@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS records (
 | `PUBLIC_BASE_URL` | N | `http://localhost:5173` | 고객 프론트 기본 URL |
 | `DATABASE_URL` | Y | `postgres://daema:daema@localhost:5432/daema_coin?sslmode=disable` | PostgreSQL DSN |
 | `APP_TIMEZONE` | N | `Asia/Seoul` | 날짜 그룹/오늘 판단 기준 timezone |
+| `SESSION_COOKIE_SAMESITE` | N | `lax` | 다른 origin 프론트에서 prod API를 호출하면 `none` 필요 |
+| `SESSION_COOKIE_SECURE` | N | HTTPS면 `true` 자동 | `SESSION_COOKIE_SAMESITE=none`이면 반드시 `true` 필요 |
+| `SESSION_COOKIE_DOMAIN` | N | empty | 세션 쿠키 domain override |
 | `GITHUB_OAUTH_CLIENT_ID` | Y | GitHub OAuth App client id | GitHub OAuth client id |
 | `GITHUB_OAUTH_CLIENT_SECRET` | Y | GitHub OAuth App secret | GitHub OAuth client secret |
 | `GITHUB_OAUTH_REDIRECT_URI` | Y | `http://localhost:8080/api/auth/github/callback` | GitHub callback URL |
