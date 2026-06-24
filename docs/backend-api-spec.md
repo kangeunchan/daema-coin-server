@@ -298,7 +298,7 @@ Query:
 승부예측 생성:
 
 - `pick`은 `home`, `draw`, `away` 중 하나다.
-- `stakeAmount`는 1 이상 정수다. 생략 시 기본값은 `100`이다.
+- `stakeAmount`는 필수이며 1 이상 정수다.
 - 이미 시작했거나 종료된 경기는 `409 PREDICTION_CLOSED`로 거절한다.
 - 같은 사용자는 같은 경기에 한 번만 투표할 수 있다.
 

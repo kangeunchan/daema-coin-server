@@ -2019,9 +2019,9 @@ func (s *server) handlePredictionCreate(w http.ResponseWriter, r *http.Request) 
 		s.fail(w, r, http.StatusConflict, "PREDICTION_CLOSED", "이미 시작했거나 종료된 경기는 투표할 수 없습니다.", map[string]any{"matchId": matchID, "status": match.Status, "statusLabel": match.StatusLabel})
 		return
 	}
-	stakeAmount := predictionStakeAmount(body)
-	if stakeAmount <= 0 {
-		s.fail(w, r, http.StatusBadRequest, "INVALID_PREDICTION_STAKE", "stakeAmount는 1 이상이어야 합니다.", map[string]any{"stakeAmount": body["stakeAmount"]})
+	stakeAmount, ok := requiredPredictionStakeAmount(body)
+	if !ok {
+		s.fail(w, r, http.StatusBadRequest, "INVALID_PREDICTION_STAKE", "stakeAmount는 필수이며 1 이상 정수여야 합니다.", map[string]any{"stakeAmount": body["stakeAmount"]})
 		return
 	}
 	body["matchId"] = matchID
@@ -2084,6 +2084,15 @@ func predictionStakeAmount(record map[string]any) int {
 		return int(math.Round(n))
 	}
 	return 100
+}
+
+func requiredPredictionStakeAmount(record map[string]any) (int, bool) {
+	n, ok := numericValue(record["stakeAmount"])
+	if !ok || math.Trunc(n) != n {
+		return 0, false
+	}
+	amount := int(n)
+	return amount, amount > 0
 }
 
 func (s *server) predictionWinningPick(ctx context.Context, matchID string, body map[string]any) (string, error) {
