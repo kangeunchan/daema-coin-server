@@ -120,6 +120,8 @@ https://v3.football.api-sports.io
 
 Useful env vars are listed in `.env.example`.
 
+World Cup prediction settlement runs as a server-side worker by default. It checks finished API-FOOTBALL fixtures every `PREDICTION_SETTLEMENT_INTERVAL` (`1m` by default), writes one settlement per match, and records the latest run under `/api/admin/system/jobs`. Set `PREDICTION_SETTLEMENT_WORKER_ENABLED=false` to disable it.
+
 ## Endpoint Coverage
 
 Customer:

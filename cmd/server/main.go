@@ -76,6 +76,9 @@ func main() {
 		football:   newFootballClientFromEnv(),
 		githubAuth: newGitHubOAuthClientFromEnv(),
 	}
+	if envBool("PREDICTION_SETTLEMENT_WORKER_ENABLED", true) {
+		go s.runPredictionSettlementWorker(ctx, envDuration("PREDICTION_SETTLEMENT_INTERVAL", time.Minute))
+	}
 
 	port := env("PORT", "8080")
 	addr := ":" + port
@@ -327,6 +330,26 @@ func env(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func envBool(key string, defaultValue bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return defaultValue
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func envDuration(key string, defaultValue time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return defaultValue
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return defaultValue
+	}
+	return duration
 }
 
 func amount(currency string, value int) map[string]any {
@@ -2076,6 +2099,12 @@ func predictionSettlementID(matchID string) string {
 	return "prediction-settlement-" + replacer.Replace(matchID)
 }
 
+var (
+	errPredictionAlreadySettled    = errors.New("prediction already settled")
+	errPredictionNoPredictions     = errors.New("no predictions to settle")
+	errPredictionResultUnavailable = errors.New("prediction result is unavailable")
+)
+
 func predictionStakeAmount(record map[string]any) int {
 	if n, ok := numericValue(record["stakeAmount"]); ok {
 		return int(math.Round(n))
@@ -2109,8 +2138,12 @@ func (s *server) predictionWinningPick(ctx context.Context, matchID string, body
 	if !ok {
 		return "", errors.New("match not found")
 	}
+	return predictionWinningPickFromMatch(match)
+}
+
+func predictionWinningPickFromMatch(match worldcupMatch) (string, error) {
 	if match.Home.Score == nil || match.Away.Score == nil {
-		return "", errors.New("match score is not available")
+		return "", errPredictionResultUnavailable
 	}
 	if *match.Home.Score > *match.Away.Score {
 		return "home", nil
@@ -2152,7 +2185,7 @@ func settlePredictions(matchID, winningPick string, predictions []map[string]any
 		}
 	}
 	if len(participants) == 0 {
-		return nil, nil, errors.New("no predictions to settle")
+		return nil, nil, errPredictionNoPredictions
 	}
 	winnerPayoutPool := totalPool - loserRefundTotal
 	winnerPayouts := map[string]int{}
@@ -2234,6 +2267,148 @@ func settlePredictions(matchID, winningPick string, predictions []map[string]any
 		"allocatedPointTotal": allocatedWinnerPayout + loserRefundTotal,
 	}
 	return settlement, ledgerEntries, nil
+}
+
+type predictionSettlementResult struct {
+	Settlement    map[string]any
+	LedgerEntries []map[string]any
+	Created       bool
+}
+
+func (s *server) settleWorldcupPrediction(ctx context.Context, matchID, winningPick, source, note string) (predictionSettlementResult, error) {
+	settlementID := predictionSettlementID(matchID)
+	if existing, ok, err := s.store.get(ctx, domainPredictionSettlements, settlementID); err != nil {
+		return predictionSettlementResult{}, err
+	} else if ok {
+		return predictionSettlementResult{Settlement: existing, Created: false}, errPredictionAlreadySettled
+	}
+
+	predictions, err := s.store.list(ctx, domainWorldcupPredictions, 10000)
+	if err != nil {
+		return predictionSettlementResult{}, err
+	}
+	predictions = filterRecords(predictions, "", recordFilter{Field: "matchId", Value: matchID})
+
+	settlement, ledgerEntries, err := settlePredictions(matchID, winningPick, predictions)
+	if err != nil {
+		return predictionSettlementResult{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	settlement["id"] = settlementID
+	settlement["settledAt"] = now
+	settlement["source"] = source
+	if note != "" {
+		settlement["note"] = note
+	}
+
+	for _, ledger := range ledgerEntries {
+		if _, err := s.store.put(ctx, domainLedgerTransactions, stringValue(ledger["id"]), ledger); err != nil {
+			return predictionSettlementResult{}, err
+		}
+	}
+
+	item, created, err := s.store.create(ctx, domainPredictionSettlements, settlementID, settlement)
+	if err != nil {
+		return predictionSettlementResult{}, err
+	}
+	if !created {
+		existing, _, _ := s.store.get(ctx, domainPredictionSettlements, settlementID)
+		return predictionSettlementResult{Settlement: existing, Created: false}, errPredictionAlreadySettled
+	}
+	return predictionSettlementResult{Settlement: item, LedgerEntries: ledgerEntries, Created: true}, nil
+}
+
+func (s *server) runPredictionSettlementWorker(ctx context.Context, interval time.Duration) {
+	slog.Info("starting worldcup prediction settlement worker", "interval", interval.String())
+	s.runPredictionSettlementCycle(ctx)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.runPredictionSettlementCycle(ctx)
+		}
+	}
+}
+
+func (s *server) runPredictionSettlementCycle(ctx context.Context) {
+	startedAt := time.Now().UTC()
+	summary := map[string]any{
+		"id":        "worldcup-prediction-settlement",
+		"name":      "World Cup prediction settlement",
+		"type":      "worker",
+		"status":    "running",
+		"startedAt": startedAt.Format(time.RFC3339),
+	}
+
+	matches, err := s.worldcupMatches(ctx)
+	if err != nil {
+		summary["status"] = "failed"
+		summary["error"] = err.Error()
+		summary["finishedAt"] = time.Now().UTC().Format(time.RFC3339)
+		_, _ = s.store.put(ctx, domainSystemJobs, "worldcup-prediction-settlement", summary)
+		slog.Warn("worldcup prediction settlement worker failed to load matches", "error", err)
+		return
+	}
+
+	checked := 0
+	eligible := 0
+	settled := 0
+	alreadySettled := 0
+	skipped := 0
+	failed := 0
+
+	for _, match := range matches {
+		checked++
+		if match.Status != "finished" {
+			continue
+		}
+		eligible++
+		winningPick, err := predictionWinningPickFromMatch(match)
+		if err != nil {
+			skipped++
+			slog.Warn("skip worldcup prediction settlement without result", "match_id", match.ID, "error", err)
+			continue
+		}
+		result, err := s.settleWorldcupPrediction(ctx, match.ID, winningPick, "worker", "경기 종료 자동 정산")
+		if errors.Is(err, errPredictionAlreadySettled) {
+			alreadySettled++
+			continue
+		}
+		if errors.Is(err, errPredictionNoPredictions) {
+			skipped++
+			continue
+		}
+		if err != nil {
+			failed++
+			slog.Error("worldcup prediction settlement failed", "match_id", match.ID, "error", err)
+			continue
+		}
+		if result.Created {
+			settled++
+			slog.Info("worldcup prediction settled", "match_id", match.ID, "winning_pick", winningPick)
+		}
+	}
+
+	status := "ok"
+	if failed > 0 {
+		status = "partial_failure"
+	}
+	summary["status"] = status
+	summary["checkedCount"] = checked
+	summary["eligibleCount"] = eligible
+	summary["settledCount"] = settled
+	summary["alreadySettledCount"] = alreadySettled
+	summary["skippedCount"] = skipped
+	summary["failedCount"] = failed
+	summary["finishedAt"] = time.Now().UTC().Format(time.RFC3339)
+	summary["durationMs"] = time.Since(startedAt).Milliseconds()
+	if _, err := s.store.put(ctx, domainSystemJobs, "worldcup-prediction-settlement", summary); err != nil {
+		slog.Warn("store worldcup prediction settlement job status", "error", err)
+	}
 }
 
 func loserRefundAmount(stake int) int {
@@ -3019,15 +3194,6 @@ func (s *server) handleAdminWorldcupStatsPut(w http.ResponseWriter, r *http.Requ
 
 func (s *server) handleAdminPredictionSettle(w http.ResponseWriter, r *http.Request) {
 	matchID := r.PathValue("matchId")
-	settlementID := predictionSettlementID(matchID)
-	if existing, ok, err := s.store.get(r.Context(), domainPredictionSettlements, settlementID); err != nil {
-		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "승부예측 정산 상태를 읽지 못했습니다.", map[string]any{"cause": err.Error()})
-		return
-	} else if ok {
-		s.fail(w, r, http.StatusConflict, "PREDICTION_ALREADY_SETTLED", "이미 정산된 경기입니다.", map[string]any{"matchId": matchID, "settlement": existing})
-		return
-	}
-
 	body, ok := s.requestRecord(w, r)
 	if !ok {
 		return
@@ -3037,34 +3203,21 @@ func (s *server) handleAdminPredictionSettle(w http.ResponseWriter, r *http.Requ
 		s.fail(w, r, http.StatusBadRequest, "INVALID_PREDICTION_RESULT", "승부예측 결과를 결정할 수 없습니다.", map[string]any{"cause": err.Error()})
 		return
 	}
-
-	predictions, _, ok := s.listStoredRecords(w, r, domainWorldcupPredictions, 10000, recordFilter{Field: "matchId", Value: matchID})
-	if !ok {
+	result, err := s.settleWorldcupPrediction(r.Context(), matchID, winningPick, "admin", stringValue(body["note"]))
+	if errors.Is(err, errPredictionAlreadySettled) {
+		s.fail(w, r, http.StatusConflict, "PREDICTION_ALREADY_SETTLED", "이미 정산된 경기입니다.", map[string]any{"matchId": matchID, "settlement": result.Settlement})
 		return
 	}
-	settlement, ledgerEntries, err := settlePredictions(matchID, winningPick, predictions)
-	if err != nil {
+	if errors.Is(err, errPredictionNoPredictions) {
 		s.fail(w, r, http.StatusBadRequest, "PREDICTION_SETTLEMENT_FAILED", "승부예측 정산에 실패했습니다.", map[string]any{"cause": err.Error()})
 		return
 	}
-	settlement["id"] = settlementID
-	settlement["settledAt"] = time.Now().UTC().Format(time.RFC3339)
-	if note := stringValue(body["note"]); note != "" {
-		settlement["note"] = note
-	}
-	item, err := s.store.put(r.Context(), domainPredictionSettlements, settlementID, settlement)
 	if err != nil {
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "승부예측 정산을 저장하지 못했습니다.", map[string]any{"cause": err.Error()})
 		return
 	}
-	for _, ledger := range ledgerEntries {
-		if _, err := s.store.put(r.Context(), domainLedgerTransactions, stringValue(ledger["id"]), ledger); err != nil {
-			s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "승부예측 포인트 거래를 저장하지 못했습니다.", map[string]any{"cause": err.Error()})
-			return
-		}
-	}
-	item["ledgerEntries"] = ledgerEntries
-	s.created(w, r, item)
+	result.Settlement["ledgerEntries"] = result.LedgerEntries
+	s.created(w, r, result.Settlement)
 }
 
 func (s *server) handleAdminWorldcupPredictions(w http.ResponseWriter, r *http.Request) {

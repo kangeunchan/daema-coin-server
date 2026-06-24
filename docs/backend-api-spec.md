@@ -304,12 +304,15 @@ Query:
 
 승부예측 정산:
 
-- 관리자 `POST /api/admin/worldcup/matches/{matchId}/predictions/settle` 호출로 1회만 정산한다.
+- 자동 정산 워커가 `PREDICTION_SETTLEMENT_INTERVAL` 간격으로 API-FOOTBALL 종료 경기를 확인해 1회만 정산한다.
+- `PREDICTION_SETTLEMENT_WORKER_ENABLED=false`로 자동 정산을 끌 수 있다.
+- 관리자 `POST /api/admin/worldcup/matches/{matchId}/predictions/settle` 호출로 수동 정산할 수도 있다.
 - 요청 body의 `winningPick`, `result`, `pick` 중 하나로 결과를 지정할 수 있다.
 - 결과가 없으면 API-FOOTBALL 스코어로 `home`, `draw`, `away`를 추론한다.
 - 예측 실패자는 본인 `stakeAmount`의 10%를 환급받는다.
 - 실패자 환급액을 제외한 전체 풀은 승리 진영 참여자가 각자 승리 진영 내 stake 비율대로 나눠 받는다.
 - 정산 결과는 `prediction_settlements`, 포인트 지급/환급 내역은 `ledger_transactions`에 저장한다.
+- 마지막 자동 정산 실행 상태는 `GET /api/admin/system/jobs`의 `worldcup-prediction-settlement` 레코드에서 확인한다.
 
 라인업 응답:
 
