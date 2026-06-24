@@ -204,6 +204,8 @@ http://localhost:8080/api/auth/github/callback
 | `GET` | `/api/search/suggestions` | 검색 제안 목록 |
 | `GET` | `/api/search` | 통합 검색 |
 
+신규 사용자가 학생 프로필을 처음 저장하면 대마코인(`DMC`) 40,000개와 대마포인트(`POINT`) 10,000개를 지급하고 `wallet_balances`, `ledger_transactions`에 기록한다.
+
 ## 6. 고객 API
 
 ### 6.1 사용자/홈
@@ -307,6 +309,8 @@ Query:
 
 - `pick`은 `home`, `draw`, `away` 중 하나다.
 - `stakeAmount`는 필수이며 1 이상 정수다.
+- `stakeAmount`는 대마포인트(`POINT`)로 차감된다.
+- 대마포인트 잔액이 부족하면 `400 INSUFFICIENT_POINT_BALANCE`로 거절한다.
 - 이미 시작했거나 종료된 경기는 `409 PREDICTION_CLOSED`로 거절한다.
 - 같은 사용자는 같은 경기에 한 번만 투표할 수 있다.
 
@@ -319,7 +323,7 @@ Query:
 - 결과가 없으면 API-FOOTBALL 스코어로 `home`, `draw`, `away`를 추론한다.
 - 예측 실패자는 본인 `stakeAmount`의 10%를 환급받는다.
 - 실패자 환급액을 제외한 전체 풀은 승리 진영 참여자가 각자 승리 진영 내 stake 비율대로 나눠 받는다.
-- 정산 결과는 `prediction_settlements`, 포인트 지급/환급 내역은 `ledger_transactions`에 저장한다.
+- 정산 결과는 `prediction_settlements`, 대마포인트 지급/환급 내역은 `ledger_transactions`와 `wallet_balances`에 저장한다.
 - 마지막 자동 정산 실행 상태는 `GET /api/admin/system/jobs`의 `worldcup-prediction-settlement` 레코드에서 확인한다.
 
 라인업 응답:
