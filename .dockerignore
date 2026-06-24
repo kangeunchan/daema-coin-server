@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+Dockerfile
+README.md
+docs
+docker-compose.yml
+tmp
+dist
+node_modules
