@@ -658,64 +658,65 @@ func randomToken() string {
 }
 
 const (
-	domainNavigation          = "navigation"
-	domainCustomerProfiles    = "customer_profiles"
-	domainNotifications       = "notifications"
-	domainSearchSuggestions   = "search_suggestions"
-	domainSearchDocuments     = "search_documents"
-	domainNotices             = "notices"
-	domainWalletBalances      = "wallet_balances"
-	domainBenefits            = "benefits"
-	domainBenefitClaims       = "benefit_claims"
-	domainShortcuts           = "shortcuts"
-	domainPromotions          = "promotions"
-	domainLedgerTransactions  = "ledger_transactions"
-	domainUserRankings        = "rankings_user"
-	domainBoothRankings       = "rankings_booth"
-	domainFestivalBanners     = "festival_banners"
-	domainPayBarcodes         = "pay_barcodes"
-	domainBoothCategories     = "booth_categories"
-	domainBoothBanners        = "booth_banners"
-	domainBooths              = "booths"
-	domainProducts            = "products"
-	domainProductViews        = "product_views"
-	domainBoothCheckins       = "booth_checkins"
-	domainCartItems           = "cart_items"
-	domainOrders              = "orders"
-	domainFavorites           = "favorites"
-	domainInquiries           = "inquiries"
-	domainShares              = "shares"
-	domainWorldcupPredictions = "worldcup_predictions"
-	domainFeatures            = "features"
-	domainStaff               = "staff"
-	domainInventory           = "inventory"
-	domainPurchaseLimits      = "purchase_limits"
-	domainPickupVouchers      = "pickup_vouchers"
-	domainPaymentIntents      = "payment_intents"
-	domainPayments            = "payments"
-	domainVisits              = "visits"
-	domainSettlements         = "settlements"
-	domainExports             = "exports"
-	domainFestivals           = "festivals"
-	domainMaps                = "maps"
-	domainUsers               = "users"
-	domainUserImports         = "user_imports"
-	domainRoles               = "roles"
-	domainRoleAssignments     = "role_assignments"
-	domainWalletAdjustments   = "wallet_adjustments"
-	domainLedgerExports       = "ledger_exports"
-	domainRewardRules         = "reward_rules"
-	domainUploads             = "uploads"
-	domainWorldcupTeams       = "worldcup_teams"
-	domainWorldcupMatches     = "worldcup_matches"
-	domainWorldcupLineups     = "worldcup_lineups"
-	domainWorldcupStats       = "worldcup_stats"
-	domainAuditLogs           = "audit_logs"
-	domainSystemJobs          = "system_jobs"
-	domainIncidents           = "incidents"
-	domainRankingRules        = "ranking_rules"
-	domainGitHubCommits       = "github_commits"
-	domainGitHubInstallations = "github_installations"
+	domainNavigation            = "navigation"
+	domainCustomerProfiles      = "customer_profiles"
+	domainNotifications         = "notifications"
+	domainSearchSuggestions     = "search_suggestions"
+	domainSearchDocuments       = "search_documents"
+	domainNotices               = "notices"
+	domainWalletBalances        = "wallet_balances"
+	domainBenefits              = "benefits"
+	domainBenefitClaims         = "benefit_claims"
+	domainShortcuts             = "shortcuts"
+	domainPromotions            = "promotions"
+	domainLedgerTransactions    = "ledger_transactions"
+	domainUserRankings          = "rankings_user"
+	domainBoothRankings         = "rankings_booth"
+	domainFestivalBanners       = "festival_banners"
+	domainPayBarcodes           = "pay_barcodes"
+	domainBoothCategories       = "booth_categories"
+	domainBoothBanners          = "booth_banners"
+	domainBooths                = "booths"
+	domainProducts              = "products"
+	domainProductViews          = "product_views"
+	domainBoothCheckins         = "booth_checkins"
+	domainCartItems             = "cart_items"
+	domainOrders                = "orders"
+	domainFavorites             = "favorites"
+	domainInquiries             = "inquiries"
+	domainShares                = "shares"
+	domainWorldcupPredictions   = "worldcup_predictions"
+	domainPredictionSettlements = "prediction_settlements"
+	domainFeatures              = "features"
+	domainStaff                 = "staff"
+	domainInventory             = "inventory"
+	domainPurchaseLimits        = "purchase_limits"
+	domainPickupVouchers        = "pickup_vouchers"
+	domainPaymentIntents        = "payment_intents"
+	domainPayments              = "payments"
+	domainVisits                = "visits"
+	domainSettlements           = "settlements"
+	domainExports               = "exports"
+	domainFestivals             = "festivals"
+	domainMaps                  = "maps"
+	domainUsers                 = "users"
+	domainUserImports           = "user_imports"
+	domainRoles                 = "roles"
+	domainRoleAssignments       = "role_assignments"
+	domainWalletAdjustments     = "wallet_adjustments"
+	domainLedgerExports         = "ledger_exports"
+	domainRewardRules           = "reward_rules"
+	domainUploads               = "uploads"
+	domainWorldcupTeams         = "worldcup_teams"
+	domainWorldcupMatches       = "worldcup_matches"
+	domainWorldcupLineups       = "worldcup_lineups"
+	domainWorldcupStats         = "worldcup_stats"
+	domainAuditLogs             = "audit_logs"
+	domainSystemJobs            = "system_jobs"
+	domainIncidents             = "incidents"
+	domainRankingRules          = "ranking_rules"
+	domainGitHubCommits         = "github_commits"
+	domainGitHubInstallations   = "github_installations"
 )
 
 type recordFilter struct {
@@ -2018,9 +2019,15 @@ func (s *server) handlePredictionCreate(w http.ResponseWriter, r *http.Request) 
 		s.fail(w, r, http.StatusConflict, "PREDICTION_CLOSED", "이미 시작했거나 종료된 경기는 투표할 수 없습니다.", map[string]any{"matchId": matchID, "status": match.Status, "statusLabel": match.StatusLabel})
 		return
 	}
+	stakeAmount := predictionStakeAmount(body)
+	if stakeAmount <= 0 {
+		s.fail(w, r, http.StatusBadRequest, "INVALID_PREDICTION_STAKE", "stakeAmount는 1 이상이어야 합니다.", map[string]any{"stakeAmount": body["stakeAmount"]})
+		return
+	}
 	body["matchId"] = matchID
 	body["userId"] = session.User.ID
 	body["githubLogin"] = session.User.Login
+	body["stakeAmount"] = stakeAmount
 	id := predictionRecordID(matchID, session.User.ID)
 	item, created, err := s.store.create(r.Context(), domainWorldcupPredictions, id, body)
 	if err != nil {
@@ -2062,6 +2069,169 @@ func (s *server) handleWorldcupLineups(w http.ResponseWriter, r *http.Request) {
 func predictionRecordID(matchID, userID string) string {
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
 	return "prediction-" + replacer.Replace(matchID) + "-" + replacer.Replace(userID)
+}
+
+func predictionSettlementID(matchID string) string {
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
+	return "prediction-settlement-" + replacer.Replace(matchID)
+}
+
+func predictionStakeAmount(record map[string]any) int {
+	if n, ok := numericValue(record["stakeAmount"]); ok {
+		return int(math.Round(n))
+	}
+	if n, ok := numericValue(record["stake"]); ok {
+		return int(math.Round(n))
+	}
+	return 100
+}
+
+func (s *server) predictionWinningPick(ctx context.Context, matchID string, body map[string]any) (string, error) {
+	for _, key := range []string{"winningPick", "result", "pick"} {
+		pick := stringValue(body[key])
+		if pick == "home" || pick == "draw" || pick == "away" {
+			return pick, nil
+		}
+	}
+	match, ok, err := s.worldcupMatchByID(ctx, matchID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", errors.New("match not found")
+	}
+	if match.Home.Score == nil || match.Away.Score == nil {
+		return "", errors.New("match score is not available")
+	}
+	if *match.Home.Score > *match.Away.Score {
+		return "home", nil
+	}
+	if *match.Home.Score < *match.Away.Score {
+		return "away", nil
+	}
+	return "draw", nil
+}
+
+func settlePredictions(matchID, winningPick string, predictions []map[string]any) (map[string]any, []map[string]any, error) {
+	if winningPick != "home" && winningPick != "draw" && winningPick != "away" {
+		return nil, nil, fmt.Errorf("invalid winning pick %q", winningPick)
+	}
+	type participant struct {
+		record map[string]any
+		pick   string
+		stake  int
+		userID string
+		login  string
+	}
+	participants := []participant{}
+	totalPool := 0
+	winnerStakeTotal := 0
+	loserRefundTotal := 0
+	for _, prediction := range predictions {
+		pick := stringValue(prediction["pick"])
+		stake := predictionStakeAmount(prediction)
+		if stake <= 0 || (pick != "home" && pick != "draw" && pick != "away") {
+			continue
+		}
+		item := participant{record: prediction, pick: pick, stake: stake, userID: stringValue(prediction["userId"]), login: stringValue(prediction["githubLogin"])}
+		participants = append(participants, item)
+		totalPool += stake
+		if pick == winningPick {
+			winnerStakeTotal += stake
+		} else {
+			loserRefundTotal += loserRefundAmount(stake)
+		}
+	}
+	if len(participants) == 0 {
+		return nil, nil, errors.New("no predictions to settle")
+	}
+	winnerPayoutPool := totalPool - loserRefundTotal
+	winnerPayouts := map[string]int{}
+	allocatedWinnerPayout := 0
+	winners := []participant{}
+	for _, participant := range participants {
+		if participant.pick == winningPick {
+			winners = append(winners, participant)
+		}
+	}
+	if winnerStakeTotal > 0 {
+		sort.SliceStable(winners, func(i, j int) bool {
+			if winners[i].stake == winners[j].stake {
+				return winners[i].userID < winners[j].userID
+			}
+			return winners[i].stake > winners[j].stake
+		})
+		for _, winner := range winners {
+			payout := winnerPayoutPool * winner.stake / winnerStakeTotal
+			winnerPayouts[winner.userID] = payout
+			allocatedWinnerPayout += payout
+		}
+		for i := 0; allocatedWinnerPayout < winnerPayoutPool && len(winners) > 0; i++ {
+			winner := winners[i%len(winners)]
+			winnerPayouts[winner.userID]++
+			allocatedWinnerPayout++
+		}
+	}
+	ledgerEntries := []map[string]any{}
+	resultRows := []map[string]any{}
+	for _, participant := range participants {
+		payout := 0
+		outcome := "lost"
+		if participant.pick == winningPick {
+			outcome = "won"
+			payout = winnerPayouts[participant.userID]
+		} else {
+			payout = loserRefundAmount(participant.stake)
+		}
+		row := map[string]any{
+			"userId":      participant.userID,
+			"githubLogin": participant.login,
+			"pick":        participant.pick,
+			"stakeAmount": participant.stake,
+			"outcome":     outcome,
+			"payout":      payout,
+		}
+		resultRows = append(resultRows, row)
+		if payout > 0 && participant.userID != "" {
+			ledgerID := predictionSettlementID(matchID) + "-" + participant.userID
+			ledgerEntries = append(ledgerEntries, map[string]any{
+				"id":          ledgerID,
+				"userId":      participant.userID,
+				"githubLogin": participant.login,
+				"type":        "worldcup-prediction-settlement",
+				"matchId":     matchID,
+				"pick":        participant.pick,
+				"winningPick": winningPick,
+				"outcome":     outcome,
+				"stakeAmount": participant.stake,
+				"amount":      amount("POINT", payout),
+				"occurredAt":  time.Now().UTC().Format(time.RFC3339),
+				"description": "월드컵 승부예측 정산",
+			})
+		}
+	}
+	settlement := map[string]any{
+		"matchId":             matchID,
+		"winningPick":         winningPick,
+		"totalPool":           totalPool,
+		"winnerStakeTotal":    winnerStakeTotal,
+		"loserRefundTotal":    loserRefundTotal,
+		"winnerPayoutPool":    winnerPayoutPool,
+		"participantCount":    len(participants),
+		"winnerCount":         len(winners),
+		"loserRefundRate":     0.1,
+		"results":             resultRows,
+		"ledgerEntryCount":    len(ledgerEntries),
+		"allocatedPointTotal": allocatedWinnerPayout + loserRefundTotal,
+	}
+	return settlement, ledgerEntries, nil
+}
+
+func loserRefundAmount(stake int) int {
+	if stake <= 0 {
+		return 0
+	}
+	return int(math.Round(float64(stake) * 0.1))
 }
 
 func (s *server) handleLedgerCalendar(w http.ResponseWriter, r *http.Request) {
@@ -2839,10 +3009,53 @@ func (s *server) handleAdminWorldcupStatsPut(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *server) handleAdminPredictionSettle(w http.ResponseWriter, r *http.Request) {
-	item, ok := s.createStoredRecord(w, r, "prediction_settlements", "prediction-settlement", map[string]any{"matchId": r.PathValue("matchId"), "settledAt": time.Now().UTC().Format(time.RFC3339)}, "settlementId")
-	if ok {
-		s.created(w, r, item)
+	matchID := r.PathValue("matchId")
+	settlementID := predictionSettlementID(matchID)
+	if existing, ok, err := s.store.get(r.Context(), domainPredictionSettlements, settlementID); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "승부예측 정산 상태를 읽지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	} else if ok {
+		s.fail(w, r, http.StatusConflict, "PREDICTION_ALREADY_SETTLED", "이미 정산된 경기입니다.", map[string]any{"matchId": matchID, "settlement": existing})
+		return
 	}
+
+	body, ok := s.requestRecord(w, r)
+	if !ok {
+		return
+	}
+	winningPick, err := s.predictionWinningPick(r.Context(), matchID, body)
+	if err != nil {
+		s.fail(w, r, http.StatusBadRequest, "INVALID_PREDICTION_RESULT", "승부예측 결과를 결정할 수 없습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+
+	predictions, _, ok := s.listStoredRecords(w, r, domainWorldcupPredictions, 10000, recordFilter{Field: "matchId", Value: matchID})
+	if !ok {
+		return
+	}
+	settlement, ledgerEntries, err := settlePredictions(matchID, winningPick, predictions)
+	if err != nil {
+		s.fail(w, r, http.StatusBadRequest, "PREDICTION_SETTLEMENT_FAILED", "승부예측 정산에 실패했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	settlement["id"] = settlementID
+	settlement["settledAt"] = time.Now().UTC().Format(time.RFC3339)
+	if note := stringValue(body["note"]); note != "" {
+		settlement["note"] = note
+	}
+	item, err := s.store.put(r.Context(), domainPredictionSettlements, settlementID, settlement)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "승부예측 정산을 저장하지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	for _, ledger := range ledgerEntries {
+		if _, err := s.store.put(r.Context(), domainLedgerTransactions, stringValue(ledger["id"]), ledger); err != nil {
+			s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "승부예측 포인트 거래를 저장하지 못했습니다.", map[string]any{"cause": err.Error()})
+			return
+		}
+	}
+	item["ledgerEntries"] = ledgerEntries
+	s.created(w, r, item)
 }
 
 func (s *server) handleAdminWorldcupPredictions(w http.ResponseWriter, r *http.Request) {

@@ -295,6 +295,22 @@ Query:
 | `GET` | `/api/customer/worldcup/matches/{matchId}/predictions/summary` | 승부예측 집계 |
 | `POST` | `/api/customer/worldcup/matches/{matchId}/predictions` | 승부예측 생성 |
 
+승부예측 생성:
+
+- `pick`은 `home`, `draw`, `away` 중 하나다.
+- `stakeAmount`는 1 이상 정수다. 생략 시 기본값은 `100`이다.
+- 이미 시작했거나 종료된 경기는 `409 PREDICTION_CLOSED`로 거절한다.
+- 같은 사용자는 같은 경기에 한 번만 투표할 수 있다.
+
+승부예측 정산:
+
+- 관리자 `POST /api/admin/worldcup/matches/{matchId}/predictions/settle` 호출로 1회만 정산한다.
+- 요청 body의 `winningPick`, `result`, `pick` 중 하나로 결과를 지정할 수 있다.
+- 결과가 없으면 API-FOOTBALL 스코어로 `home`, `draw`, `away`를 추론한다.
+- 예측 실패자는 본인 `stakeAmount`의 10%를 환급받는다.
+- 실패자 환급액을 제외한 전체 풀은 승리 진영 참여자가 각자 승리 진영 내 stake 비율대로 나눠 받는다.
+- 정산 결과는 `prediction_settlements`, 포인트 지급/환급 내역은 `ledger_transactions`에 저장한다.
+
 라인업 응답:
 
 ```json
