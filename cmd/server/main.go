@@ -161,6 +161,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/customer/worldcup/matches/{matchId}", s.handleWorldcupMatch)
 	mux.HandleFunc("GET /api/customer/worldcup/matches/{matchId}/predictions/summary", s.handlePredictionSummary)
 	mux.HandleFunc("POST /api/customer/worldcup/matches/{matchId}/predictions", s.handlePredictionCreate)
+	mux.HandleFunc("DELETE /api/customer/worldcup/matches/{matchId}/predictions", s.handlePredictionCancel)
 	mux.HandleFunc("GET /api/customer/worldcup/matches/{matchId}/stats", s.handleWorldcupStats)
 	mux.HandleFunc("GET /api/customer/worldcup/matches/{matchId}/lineups", s.handleWorldcupLineups)
 
@@ -2311,6 +2312,7 @@ func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request)
 	}
 	counts := map[string]int{"home": 0, "draw": 0, "away": 0}
 	myPrediction := ""
+	myStakeAmount := 0
 	userID := s.currentUserID(r)
 	for _, item := range items {
 		pick := stringValue(item["pick"])
@@ -2319,6 +2321,7 @@ func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request)
 		}
 		if userID != "" && stringValue(item["userId"]) == userID {
 			myPrediction = pick
+			myStakeAmount = predictionStakeAmount(item)
 		}
 	}
 	total := counts["home"] + counts["draw"] + counts["away"]
@@ -2329,13 +2332,15 @@ func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request)
 		return int(math.Round(float64(count) / float64(total) * 100))
 	}
 	data := map[string]any{
-		"matchId":      matchID,
-		"homePercent":  percent(counts["home"]),
-		"drawPercent":  percent(counts["draw"]),
-		"awayPercent":  percent(counts["away"]),
-		"totalCount":   total,
-		"canPredict":   myPrediction == "" && (!matchStatusKnown || match.Status == "scheduled"),
-		"myPrediction": nil,
+		"matchId":       matchID,
+		"homePercent":   percent(counts["home"]),
+		"drawPercent":   percent(counts["draw"]),
+		"awayPercent":   percent(counts["away"]),
+		"totalCount":    total,
+		"canPredict":    myPrediction == "" && (!matchStatusKnown || match.Status == "scheduled"),
+		"canCancel":     myPrediction != "" && (!matchStatusKnown || match.Status == "scheduled"),
+		"myPrediction":  nil,
+		"myStakeAmount": nil,
 	}
 	if matchStatusKnown {
 		data["matchStatus"] = match.Status
@@ -2343,6 +2348,7 @@ func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request)
 	}
 	if myPrediction != "" {
 		data["myPrediction"] = myPrediction
+		data["myStakeAmount"] = myStakeAmount
 	}
 	s.ok(w, r, data)
 }
@@ -2414,6 +2420,59 @@ func (s *server) handlePredictionCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.created(w, r, item)
+}
+
+func (s *server) handlePredictionCancel(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		s.fail(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "GitHub 로그인이 필요합니다.", nil)
+		return
+	}
+	matchID := r.PathValue("matchId")
+	match, matchStatusKnown, err := s.worldcupMatchByID(r.Context(), matchID)
+	if err != nil {
+		s.failFootball(w, r, err)
+		return
+	}
+	if matchStatusKnown && match.Status != "scheduled" {
+		s.fail(w, r, http.StatusConflict, "PREDICTION_CANCEL_CLOSED", "이미 시작했거나 종료된 경기는 투표를 취소할 수 없습니다.", map[string]any{"matchId": matchID, "status": match.Status, "statusLabel": match.StatusLabel})
+		return
+	}
+	id := predictionRecordID(matchID, session.User.ID)
+	existing, found, err := s.store.get(r.Context(), domainWorldcupPredictions, id)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "승부예측을 읽지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	if !found {
+		s.fail(w, r, http.StatusNotFound, "PREDICTION_NOT_FOUND", "취소할 승부예측이 없습니다.", map[string]any{"matchId": matchID})
+		return
+	}
+	stakeAmount := predictionStakeAmount(existing)
+	if stakeAmount <= 0 {
+		s.fail(w, r, http.StatusConflict, "PREDICTION_CANCEL_FAILED", "환급할 투표 금액을 확인할 수 없습니다.", map[string]any{"matchId": matchID})
+		return
+	}
+	_, err = s.createLedgerAndAdjustWallet(r.Context(), session.User, ledgerRecordID("prediction-cancel", matchID, session.User.ID, strconv.FormatInt(time.Now().UTC().UnixNano(), 10)), "worldcup-prediction-cancel", "income", predictionCurrency, stakeAmount, map[string]any{
+		"matchId":     matchID,
+		"pick":        stringValue(existing["pick"]),
+		"stakeAmount": stakeAmount,
+		"description": "월드컵 승부예측 취소 환급",
+	})
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "승부예측 취소 환급에 실패했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	if err := s.store.delete(r.Context(), domainWorldcupPredictions, id); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "승부예측을 취소하지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	s.ok(w, r, map[string]any{
+		"matchId":      matchID,
+		"cancelled":    true,
+		"refundAmount": stakeAmount,
+		"currency":     predictionCurrency,
+	})
 }
 
 func (s *server) handleWorldcupStats(w http.ResponseWriter, r *http.Request) {

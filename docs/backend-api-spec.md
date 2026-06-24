@@ -306,6 +306,7 @@ Query:
 | `GET` | `/api/customer/worldcup/matches/{matchId}/lineups` | 라인업 |
 | `GET` | `/api/customer/worldcup/matches/{matchId}/predictions/summary` | 승부예측 집계 |
 | `POST` | `/api/customer/worldcup/matches/{matchId}/predictions` | 승부예측 생성 |
+| `DELETE` | `/api/customer/worldcup/matches/{matchId}/predictions` | 승부예측 취소 |
 
 승부예측 생성:
 
@@ -315,6 +316,13 @@ Query:
 - 대마포인트 잔액이 부족하면 `400 INSUFFICIENT_POINT_BALANCE`로 거절한다.
 - 이미 시작했거나 종료된 경기는 `409 PREDICTION_CLOSED`로 거절한다.
 - 같은 사용자는 같은 경기에 한 번만 투표할 수 있다.
+
+승부예측 취소:
+
+- 경기 시작 전(`scheduled`)까지만 취소할 수 있다.
+- 취소 시 기존 예측 레코드를 삭제하고 `stakeAmount` 전액을 대마포인트(`POINT`)로 환급한다.
+- 취소 후 경기 시작 전이면 다시 투표할 수 있다.
+- 취소할 예측이 없으면 `404 PREDICTION_NOT_FOUND`, 이미 시작했거나 종료된 경기는 `409 PREDICTION_CANCEL_CLOSED`로 거절한다.
 
 승부예측 정산:
 
