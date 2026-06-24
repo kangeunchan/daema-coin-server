@@ -91,10 +91,12 @@ Commit history APIs read commits stored from GitHub App `push` webhooks. GitHub 
 Required GitHub App settings:
 
 - Webhook URL: `http://localhost:8080/api/github/webhooks`
+- Setup URL: `http://localhost:8080/api/github/app/setup`
 - Webhook events: `push`, `ping`, `installation`, `installation_repositories`
 - Repository permission: Contents read-only is enough for push payload delivery
 - `GITHUB_WEBHOOK_SECRET` must match the GitHub App webhook secret
 - `GITHUB_APP_INSTALL_URL` should point to the GitHub App install page
+- `GITHUB_APP_INSTALL_ON_LOGIN=true` redirects customer logins to the GitHub App install page when the app is not installed yet
 
 Relevant GitHub docs:
 

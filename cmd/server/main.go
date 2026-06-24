@@ -102,6 +102,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/auth/me", s.handleAuthMe)
 	mux.HandleFunc("PUT /api/auth/me/student-profile", s.handleStudentProfile)
 	mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
+	mux.HandleFunc("GET /api/github/app/setup", s.handleGitHubAppSetup)
 	mux.HandleFunc("POST /api/github/webhooks", s.handleGitHubWebhook)
 
 	mux.HandleFunc("GET /api/customer/me", s.handleCustomerMe)
@@ -453,6 +454,10 @@ func (s *server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 
 	setSessionCookie(w, session)
 	redirectURL := appendQuery(redirectAfter, map[string]string{"login": "success", "role": session.Role})
+	if installURL, shouldInstall := s.githubAppInstallRedirectURL(r.Context(), session, redirectURL); shouldInstall {
+		http.Redirect(w, r, installURL, http.StatusFound)
+		return
+	}
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
@@ -1466,11 +1471,82 @@ func (s *server) handleGitHubAppInstallation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	installURL := env("GITHUB_APP_INSTALL_URL", "")
+	installed, _ := s.githubAppInstalledForUser(r.Context(), session.User)
 	s.ok(w, r, map[string]any{
 		"configured": installURL != "",
 		"installUrl": installURL,
+		"installed":  installed,
 		"login":      session.User.Login,
 	})
+}
+
+func (s *server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
+	redirectURL := env("AUTH_SUCCESS_REDIRECT_URL", env("PUBLIC_BASE_URL", "http://localhost:5173")+"/login")
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		http.Redirect(w, r, appendQuery(redirectURL, map[string]string{"login": "required", "githubApp": "setup"}), http.StatusFound)
+		return
+	}
+	installationID := strings.TrimSpace(r.URL.Query().Get("installation_id"))
+	setupAction := strings.TrimSpace(r.URL.Query().Get("setup_action"))
+	if installationID != "" {
+		_, _ = s.store.put(r.Context(), domainGitHubInstallations, "user-"+session.User.ID, map[string]any{
+			"installationId": installationID,
+			"setupAction":    setupAction,
+			"userId":         session.User.ID,
+			"githubLogin":    session.User.Login,
+			"githubId":       session.User.GitHubID,
+			"connectedAt":    time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	http.Redirect(w, r, appendQuery(redirectURL, map[string]string{"login": "success", "role": session.Role, "githubApp": "installed"}), http.StatusFound)
+}
+
+func (s *server) githubAppInstallRedirectURL(ctx context.Context, session authSession, redirectAfter string) (string, bool) {
+	if session.Role != "customer" || !envBool("GITHUB_APP_INSTALL_ON_LOGIN", true) {
+		return "", false
+	}
+	installURL := env("GITHUB_APP_INSTALL_URL", "")
+	if installURL == "" {
+		return "", false
+	}
+	installed, err := s.githubAppInstalledForUser(ctx, session.User)
+	if err != nil {
+		slog.Warn("check github app installation", "user_id", session.User.ID, "error", err)
+	}
+	if installed {
+		return "", false
+	}
+	return appendQuery(installURL, map[string]string{"state": randomToken(), "redirect_after": redirectAfter}), true
+}
+
+func (s *server) githubAppInstalledForUser(ctx context.Context, user authUser) (bool, error) {
+	if user.ID == "" {
+		return false, nil
+	}
+	if _, ok, err := s.store.get(ctx, domainGitHubInstallations, "user-"+user.ID); err != nil || ok {
+		return ok, err
+	}
+	items, err := s.store.list(ctx, domainGitHubInstallations, 1000)
+	if err != nil {
+		return false, err
+	}
+	for _, item := range items {
+		action := strings.ToLower(stringValue(item["action"]))
+		if action == "deleted" || action == "suspend" {
+			continue
+		}
+		if stringValue(item["githubLogin"]) == user.Login || stringValue(item["accountLogin"]) == user.Login || stringValue(item["senderLogin"]) == user.Login {
+			return true, nil
+		}
+		if account, _ := item["account"].(map[string]any); stringValue(account["login"]) == user.Login {
+			return true, nil
+		}
+		if sender, _ := item["sender"].(map[string]any); stringValue(sender["login"]) == user.Login {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
@@ -1612,6 +1688,12 @@ func (s *server) storeGitHubInstallationEvent(ctx context.Context, event, delive
 	payload["event"] = event
 	payload["deliveryId"] = deliveryID
 	payload["receivedAt"] = time.Now().UTC().Format(time.RFC3339)
+	if account, _ := payload["account"].(map[string]any); account != nil {
+		payload["accountLogin"] = stringValue(account["login"])
+	}
+	if sender, _ := payload["sender"].(map[string]any); sender != nil {
+		payload["senderLogin"] = stringValue(sender["login"])
+	}
 	_, err := s.store.put(ctx, domainGitHubInstallations, installationID, payload)
 	return err
 }

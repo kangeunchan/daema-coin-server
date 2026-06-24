@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS records (
 | `GITHUB_COMMIT_MAX_PAGES` | N | `5` | GitHub commits pagination 제한 |
 | `GITHUB_REPOSITORY_MAX_PAGES` | N | `10` | 접근 가능 저장소 탐색 pagination 제한 |
 | `GITHUB_APP_INSTALL_URL` | Y | GitHub App install URL | 사용자가 GitHub App을 설치할 URL |
+| `GITHUB_APP_INSTALL_ON_LOGIN` | N | `true` | 고객 GitHub 로그인 후 미설치 상태면 GitHub App 설치 화면으로 redirect |
 | `GITHUB_WEBHOOK_SECRET` | Y | GitHub App webhook secret | webhook 서명 검증 secret |
 | `AUTH_SUCCESS_REDIRECT_URL` | N | `http://localhost:5173/login` | 고객 OAuth 성공 redirect |
 | `SELLER_AUTH_SUCCESS_REDIRECT_URL` | N | `http://localhost:5174/` | 셀러 OAuth 성공 redirect |
@@ -257,12 +258,16 @@ GitHub App webhook 설정:
 | 항목 | 값 |
 | --- | --- |
 | Webhook URL | `http://localhost:8080/api/github/webhooks` |
+| Setup URL | `http://localhost:8080/api/github/app/setup` |
 | Events | `push`, `ping`, `installation`, `installation_repositories` |
 | Secret | `GITHUB_WEBHOOK_SECRET` |
 | Install URL | `GITHUB_APP_INSTALL_URL` |
 
+고객 GitHub OAuth 로그인 후 `GITHUB_APP_INSTALL_ON_LOGIN=true`이고 GitHub App 설치 기록이 없으면 서버가 바로 `GITHUB_APP_INSTALL_URL`로 redirect한다. GitHub App 설치가 끝나면 Setup URL(`/api/github/app/setup`)에서 현재 세션과 `installation_id`를 연결한 뒤 `AUTH_SUCCESS_REDIRECT_URL`로 되돌린다. 이 흐름에서는 프론트에 별도 설치 필요/완료 화면을 만들지 않는다.
+
 | Method | Path | 설명 |
 | --- | --- | --- |
+| `GET` | `/api/github/app/setup` | GitHub App 설치 후 세션 연결 및 프론트 복귀 |
 | `POST` | `/api/github/webhooks` | GitHub App webhook 수신 |
 | `GET` | `/api/customer/github/app-installation` | GitHub App 설치 URL |
 | `GET` | `/api/customer/github/commits` | GitHub 커밋 목록 |
