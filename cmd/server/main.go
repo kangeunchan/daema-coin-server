@@ -495,6 +495,10 @@ func (s *server) handleGitHubSession(w http.ResponseWriter, r *http.Request) {
 		s.ok(w, r, map[string]any{"status": "profile_required"})
 		return
 	}
+	if err := s.grantSignupBonus(r.Context(), session.User); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "가입 보상을 지급하지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
 	s.ok(w, r, map[string]any{"status": "authenticated"})
 }
 
@@ -514,6 +518,10 @@ func (s *server) handleStudentProfile(w http.ResponseWriter, r *http.Request) {
 	item, err := s.store.put(r.Context(), domainCustomerProfiles, session.User.ID, profile)
 	if err != nil {
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "학생 프로필을 저장하지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	if err := s.grantSignupBonus(r.Context(), session.User); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "가입 보상을 지급하지 못했습니다.", map[string]any{"cause": err.Error()})
 		return
 	}
 	s.ok(w, r, item)
@@ -720,6 +728,12 @@ func randomToken() string {
 	}
 	return hex.EncodeToString(b[:])
 }
+
+const (
+	initialSignupDMC    = 40000
+	initialSignupPoints = 10000
+	predictionCurrency  = "POINT"
+)
 
 const (
 	domainNavigation            = "navigation"
@@ -1051,6 +1065,108 @@ func amountValue(record map[string]any) int {
 		}
 	}
 	return 0
+}
+
+func walletBalanceID(userID, currency string) string {
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
+	return "wallet-" + replacer.Replace(userID) + "-" + strings.ToUpper(currency)
+}
+
+func ledgerRecordID(parts ...string) string {
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
+	clean := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			clean = append(clean, replacer.Replace(part))
+		}
+	}
+	return strings.Join(clean, "-")
+}
+
+func walletCurrencyLabel(currency string) string {
+	switch strings.ToUpper(currency) {
+	case "POINT":
+		return "대마포인트"
+	default:
+		return "대마코인"
+	}
+}
+
+func (s *server) walletBalance(ctx context.Context, userID, currency string) (int, error) {
+	item, ok, err := s.store.get(ctx, domainWalletBalances, walletBalanceID(userID, currency))
+	if err != nil || !ok {
+		return 0, err
+	}
+	if n, ok := numericValue(item["balance"]); ok {
+		return int(n), nil
+	}
+	if n, ok := numericValue(item["amount"]); ok {
+		return int(n), nil
+	}
+	return 0, nil
+}
+
+func (s *server) adjustWalletBalance(ctx context.Context, user authUser, currency string, delta int) (map[string]any, error) {
+	currency = strings.ToUpper(currency)
+	id := walletBalanceID(user.ID, currency)
+	existing, _, err := s.store.get(ctx, domainWalletBalances, id)
+	if err != nil {
+		return nil, err
+	}
+	current := 0
+	if existing != nil {
+		if n, ok := numericValue(existing["balance"]); ok {
+			current = int(n)
+		} else if n, ok := numericValue(existing["amount"]); ok {
+			current = int(n)
+		}
+	}
+	next := current + delta
+	item := map[string]any{
+		"userId":      user.ID,
+		"githubLogin": user.Login,
+		"currency":    currency,
+		"label":       walletCurrencyLabel(currency),
+		"name":        walletCurrencyLabel(currency),
+		"balance":     next,
+		"amount":      amount(currency, next),
+	}
+	return s.store.put(ctx, domainWalletBalances, id, item)
+}
+
+func (s *server) createLedgerAndAdjustWallet(ctx context.Context, user authUser, id, txType, direction, currency string, value int, extras map[string]any) (bool, error) {
+	if value <= 0 {
+		return false, nil
+	}
+	ledger := map[string]any{
+		"userId":      user.ID,
+		"githubLogin": user.Login,
+		"type":        txType,
+		"direction":   direction,
+		"amount":      amount(currency, value),
+		"occurredAt":  time.Now().UTC().Format(time.RFC3339),
+	}
+	for key, value := range extras {
+		ledger[key] = value
+	}
+	_, created, err := s.store.create(ctx, domainLedgerTransactions, id, ledger)
+	if err != nil || !created {
+		return created, err
+	}
+	delta := value
+	if direction != "income" {
+		delta = -value
+	}
+	_, err = s.adjustWalletBalance(ctx, user, currency, delta)
+	return created, err
+}
+
+func (s *server) grantSignupBonus(ctx context.Context, user authUser) error {
+	if _, err := s.createLedgerAndAdjustWallet(ctx, user, ledgerRecordID("signup-bonus", "DMC", user.ID), "signup-bonus", "income", "DMC", initialSignupDMC, map[string]any{"description": "회원가입 대마코인 지급"}); err != nil {
+		return err
+	}
+	_, err := s.createLedgerAndAdjustWallet(ctx, user, ledgerRecordID("signup-bonus", "POINT", user.ID), "signup-bonus", "income", "POINT", initialSignupPoints, map[string]any{"description": "회원가입 대마포인트 지급"})
+	return err
 }
 
 func countUnread(items []map[string]any) int {
@@ -2165,10 +2281,20 @@ func (s *server) handlePredictionCreate(w http.ResponseWriter, r *http.Request) 
 		s.fail(w, r, http.StatusBadRequest, "INVALID_PREDICTION_STAKE", "stakeAmount는 필수이며 1 이상 정수여야 합니다.", map[string]any{"stakeAmount": body["stakeAmount"]})
 		return
 	}
+	pointBalance, err := s.walletBalance(r.Context(), session.User.ID, predictionCurrency)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "대마포인트 잔액을 읽지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	if pointBalance < stakeAmount {
+		s.fail(w, r, http.StatusBadRequest, "INSUFFICIENT_POINT_BALANCE", "대마포인트 잔액이 부족합니다.", map[string]any{"balance": pointBalance, "stakeAmount": stakeAmount})
+		return
+	}
 	body["matchId"] = matchID
 	body["userId"] = session.User.ID
 	body["githubLogin"] = session.User.Login
 	body["stakeAmount"] = stakeAmount
+	body["currency"] = predictionCurrency
 	id := predictionRecordID(matchID, session.User.ID)
 	item, created, err := s.store.create(r.Context(), domainWorldcupPredictions, id, body)
 	if err != nil {
@@ -2178,6 +2304,17 @@ func (s *server) handlePredictionCreate(w http.ResponseWriter, r *http.Request) 
 	if !created {
 		existing, _, _ := s.store.get(r.Context(), domainWorldcupPredictions, id)
 		s.fail(w, r, http.StatusConflict, "PREDICTION_ALREADY_EXISTS", "이미 이 경기에 투표했습니다.", map[string]any{"matchId": matchID, "prediction": existing})
+		return
+	}
+	_, err = s.createLedgerAndAdjustWallet(r.Context(), session.User, ledgerRecordID("prediction-stake", matchID, session.User.ID), "worldcup-prediction-stake", "expense", predictionCurrency, stakeAmount, map[string]any{
+		"matchId":     matchID,
+		"pick":        pick,
+		"stakeAmount": stakeAmount,
+		"description": "월드컵 승부예측 참여",
+	})
+	if err != nil {
+		_ = s.store.delete(r.Context(), domainWorldcupPredictions, id)
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "승부예측 포인트 차감에 실패했습니다.", map[string]any{"cause": err.Error()})
 		return
 	}
 	s.created(w, r, item)
@@ -2364,7 +2501,8 @@ func settlePredictions(matchID, winningPick string, predictions []map[string]any
 				"winningPick": winningPick,
 				"outcome":     outcome,
 				"stakeAmount": participant.stake,
-				"amount":      amount("POINT", payout),
+				"direction":   "income",
+				"amount":      amount(predictionCurrency, payout),
 				"occurredAt":  time.Now().UTC().Format(time.RFC3339),
 				"description": "월드컵 승부예측 정산",
 			})
@@ -2422,6 +2560,12 @@ func (s *server) settleWorldcupPrediction(ctx context.Context, matchID, winningP
 	for _, ledger := range ledgerEntries {
 		if _, err := s.store.put(ctx, domainLedgerTransactions, stringValue(ledger["id"]), ledger); err != nil {
 			return predictionSettlementResult{}, err
+		}
+		user := authUser{ID: stringValue(ledger["userId"]), Login: stringValue(ledger["githubLogin"])}
+		if user.ID != "" {
+			if _, err := s.adjustWalletBalance(ctx, user, predictionCurrency, amountValue(ledger)); err != nil {
+				return predictionSettlementResult{}, err
+			}
 		}
 	}
 
