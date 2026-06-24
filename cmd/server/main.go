@@ -596,7 +596,7 @@ func (s *server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("daema_session"); err == nil {
 		_ = s.store.deleteSession(r.Context(), cookie.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: "daema_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, sessionCookie("", time.Time{}, -1))
 	s.ok(w, r, map[string]any{"loggedOut": true})
 }
 
@@ -619,7 +619,43 @@ func (s *server) sessionFromRequest(r *http.Request) (authSession, bool) {
 }
 
 func setSessionCookie(w http.ResponseWriter, session authSession) {
-	http.SetCookie(w, &http.Cookie{Name: "daema_session", Value: session.Token, Path: "/", Expires: session.ExpiresAt, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, sessionCookie(session.Token, session.ExpiresAt, 0))
+}
+
+func sessionCookie(value string, expires time.Time, maxAge int) *http.Cookie {
+	cookie := &http.Cookie{
+		Name:     "daema_session",
+		Value:    value,
+		Path:     "/",
+		Expires:  expires,
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: sessionCookieSameSite(),
+		Secure:   sessionCookieSecure(),
+	}
+	if domain := env("SESSION_COOKIE_DOMAIN", ""); domain != "" {
+		cookie.Domain = domain
+	}
+	return cookie
+}
+
+func sessionCookieSameSite() http.SameSite {
+	switch strings.ToLower(env("SESSION_COOKIE_SAMESITE", "lax")) {
+	case "none":
+		return http.SameSiteNoneMode
+	case "strict":
+		return http.SameSiteStrictMode
+	default:
+		return http.SameSiteLaxMode
+	}
+}
+
+func sessionCookieSecure() bool {
+	value := strings.TrimSpace(os.Getenv("SESSION_COOKIE_SECURE"))
+	if value != "" {
+		return envBool("SESSION_COOKIE_SECURE", false)
+	}
+	return strings.HasPrefix(env("GITHUB_OAUTH_REDIRECT_URI", ""), "https://") || strings.HasPrefix(env("PUBLIC_BASE_URL", ""), "https://")
 }
 
 func bearerToken(r *http.Request) string {

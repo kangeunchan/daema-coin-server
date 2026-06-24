@@ -23,6 +23,8 @@ docker run --rm -p 8080:8080 \
   -e PUBLIC_BASE_URL=http://localhost:5173 \
   -e DATABASE_URL='postgres://daema:daema@host.docker.internal:5432/daema_coin?sslmode=disable' \
   -e APP_TIMEZONE=Asia/Seoul \
+  -e SESSION_COOKIE_SAMESITE=lax \
+  -e SESSION_COOKIE_SECURE=false \
   -e GITHUB_OAUTH_CLIENT_ID='<github-oauth-client-id>' \
   -e GITHUB_OAUTH_CLIENT_SECRET='<github-oauth-client-secret>' \
   -e GITHUB_OAUTH_REDIRECT_URI='http://localhost:8080/api/auth/github/callback' \
@@ -34,6 +36,14 @@ docker run --rm -p 8080:8080 \
 ```
 
 The server reads real environment variables first. `.env` is only a local development convenience file loaded when present.
+
+When the API is deployed on HTTPS and the customer frontend runs on another origin, set:
+
+```env
+CORS_ALLOW_ORIGIN=http://localhost:5173
+SESSION_COOKIE_SAMESITE=none
+SESSION_COOKIE_SECURE=true
+```
 
 When running the container against the compose Postgres from Docker Desktop, set `DATABASE_URL` to a reachable host address:
 
