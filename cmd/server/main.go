@@ -2453,18 +2453,22 @@ func (s *server) handlePredictionCancel(w http.ResponseWriter, r *http.Request) 
 		s.fail(w, r, http.StatusConflict, "PREDICTION_CANCEL_FAILED", "환급할 투표 금액을 확인할 수 없습니다.", map[string]any{"matchId": matchID})
 		return
 	}
-	_, err = s.createLedgerAndAdjustWallet(r.Context(), session.User, ledgerRecordID("prediction-cancel", matchID, session.User.ID, strconv.FormatInt(time.Now().UTC().UnixNano(), 10)), "worldcup-prediction-cancel", "income", predictionCurrency, stakeAmount, map[string]any{
+	// 환급 전에 먼저 예측 레코드를 삭제하여 중복 취소를 방지
+	if err := s.store.delete(r.Context(), domainWorldcupPredictions, id); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "승부예측을 취소하지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	// 타임스탬프 없이 고정 ID를 사용하여 멱등성 보장 (중복 환급 방지)
+	_, err = s.createLedgerAndAdjustWallet(r.Context(), session.User, ledgerRecordID("prediction-cancel", matchID, session.User.ID), "worldcup-prediction-cancel", "income", predictionCurrency, stakeAmount, map[string]any{
 		"matchId":     matchID,
 		"pick":        stringValue(existing["pick"]),
 		"stakeAmount": stakeAmount,
 		"description": "월드컵 승부예측 취소 환급",
 	})
 	if err != nil {
+		// 환급 실패 시 예측 레코드를 복구
+		_, _, _ = s.store.create(r.Context(), domainWorldcupPredictions, id, existing)
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "승부예측 취소 환급에 실패했습니다.", map[string]any{"cause": err.Error()})
-		return
-	}
-	if err := s.store.delete(r.Context(), domainWorldcupPredictions, id); err != nil {
-		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "승부예측을 취소하지 못했습니다.", map[string]any{"cause": err.Error()})
 		return
 	}
 	s.ok(w, r, map[string]any{
