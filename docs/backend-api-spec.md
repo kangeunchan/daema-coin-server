@@ -258,6 +258,8 @@ http://localhost:8080/api/auth/github/callback
 
 커밋 API는 GitHub OAuth 세션으로 로그인 사용자를 식별하고, GitHub App `push` webhook으로 DB에 저장된 커밋만 조회한다. 화면 요청 중 GitHub REST로 저장소 전체를 스캔하지 않는다.
 
+커밋 리워드는 GitHub App `push` webhook에서 신규 커밋이 처음 저장될 때 지급한다. 커밋 1개당 대마포인트(`POINT`) 500P를 지급하고, 사용자별 하루 최대 10개 커밋까지만 포인트를 지급한다. 하루 지급 한도를 초과한 커밋은 커밋 내역에는 저장하지만 `rewardedPoints`는 0으로 기록한다.
+
 GitHub App webhook 설정:
 
 | 항목 | 값 |
