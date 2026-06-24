@@ -730,9 +730,12 @@ func randomToken() string {
 }
 
 const (
-	initialSignupDMC    = 40000
-	initialSignupPoints = 10000
-	predictionCurrency  = "POINT"
+	initialSignupDMC     = 40000
+	initialSignupPoints  = 10000
+	predictionCurrency   = "POINT"
+	commitRewardPoints   = 500
+	commitRewardLimit    = 10
+	commitRewardCurrency = "POINT"
 )
 
 const (
@@ -1559,14 +1562,18 @@ func (s *server) handleCommitActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	counts := map[string]int{}
+	rewards := map[string]int{}
 	for _, commit := range commits {
-		counts[commit.OccurredAt.In(appLocation()).Format("2006-01-02")]++
+		day := commit.OccurredAt.In(appLocation()).Format("2006-01-02")
+		counts[day]++
+		rewards[day] += commit.RewardPoints
 	}
 	items := []map[string]any{}
 	for day := from; !day.After(to); day = day.AddDate(0, 0, 1) {
-		count := counts[day.Format("2006-01-02")]
+		key := day.Format("2006-01-02")
+		count := counts[key]
 		level := commitLevel(count)
-		items = append(items, map[string]any{"date": day.Format("2006-01-02"), "count": count, "level": level, "rewardedPoints": count * 10})
+		items = append(items, map[string]any{"date": key, "count": count, "level": level, "rewardedPoints": rewards[key]})
 	}
 	s.ok(w, r, items)
 }
@@ -1868,6 +1875,10 @@ func (s *server) storeGitHubPushEvent(ctx context.Context, deliveryID string, bo
 			occurredAt = time.Now().UTC()
 		}
 		authorLogin := firstNonEmpty(commit.Author.Username, commit.Committer.Username, payload.Sender.Login, payload.Pusher.Name)
+		rewardPoints, rewardUser, err := s.githubCommitReward(ctx, authorLogin, occurredAt)
+		if err != nil {
+			return count, err
+		}
 		title := strings.TrimSpace(strings.Split(commit.Message, "\n")[0])
 		item := githubCommitItem{
 			SHA:          commit.ID,
@@ -1879,7 +1890,7 @@ func (s *server) storeGitHubPushEvent(ctx context.Context, deliveryID string, bo
 			AuthorLogin:  authorLogin,
 			OccurredAt:   occurredAt,
 			HTMLURL:      commit.URL,
-			RewardPoints: 10,
+			RewardPoints: rewardPoints,
 		}
 		data, err := typedRecord(item)
 		if err != nil {
@@ -1899,11 +1910,94 @@ func (s *server) storeGitHubPushEvent(ctx context.Context, deliveryID string, bo
 		if payload.Installation != nil {
 			data["installationId"] = payload.Installation.ID
 		}
-		_, err = s.store.put(ctx, domainGitHubCommits, githubCommitRecordID(payload.Repository.FullName, commit.ID), data)
+		commitRecordID := githubCommitRecordID(payload.Repository.FullName, commit.ID)
+		_, created, err := s.store.create(ctx, domainGitHubCommits, commitRecordID, data)
 		if err != nil {
 			return count, err
 		}
+		if !created {
+			continue
+		}
+		if rewardPoints > 0 && rewardUser.ID != "" {
+			_, err = s.createLedgerAndAdjustWallet(ctx, rewardUser, ledgerRecordID("github-commit-reward", rewardUser.ID, payload.Repository.FullName, commit.ID), "github-commit-reward", "income", commitRewardCurrency, rewardPoints, map[string]any{
+				"description": "GitHub 커밋 리워드",
+				"commitSha":   commit.ID,
+				"repository":  payload.Repository.FullName,
+				"htmlUrl":     commit.URL,
+				"occurredAt":  occurredAt.UTC().Format(time.RFC3339),
+			})
+			if err != nil {
+				return count, err
+			}
+		}
 		count++
+	}
+	return count, nil
+}
+
+func (s *server) githubCommitReward(ctx context.Context, authorLogin string, occurredAt time.Time) (int, authUser, error) {
+	user, ok, err := s.authUserForGitHubLogin(ctx, authorLogin)
+	if err != nil || !ok {
+		return 0, authUser{}, err
+	}
+	rewardedCount, err := s.rewardedGitHubCommitCountForDay(ctx, authorLogin, occurredAt)
+	if err != nil {
+		return 0, authUser{}, err
+	}
+	if rewardedCount >= commitRewardLimit {
+		return 0, user, nil
+	}
+	return commitRewardPoints, user, nil
+}
+
+func (s *server) authUserForGitHubLogin(ctx context.Context, login string) (authUser, bool, error) {
+	login = strings.TrimSpace(login)
+	if login == "" {
+		return authUser{}, false, nil
+	}
+	profiles, err := s.store.list(ctx, domainCustomerProfiles, 10000)
+	if err != nil {
+		return authUser{}, false, err
+	}
+	for _, profile := range profiles {
+		if !strings.EqualFold(stringValue(profile["githubLogin"]), login) {
+			continue
+		}
+		githubID := int64(0)
+		if value, ok := numericValue(profile["githubId"]); ok {
+			githubID = int64(value)
+		}
+		return authUser{
+			ID:       envDefault(stringValue(profile["userId"]), stringValue(profile["id"])),
+			GitHubID: githubID,
+			Login:    stringValue(profile["githubLogin"]),
+			Name:     stringValue(profile["name"]),
+		}, true, nil
+	}
+	return authUser{}, false, nil
+}
+
+func (s *server) rewardedGitHubCommitCountForDay(ctx context.Context, login string, occurredAt time.Time) (int, error) {
+	items, err := s.store.list(ctx, domainGitHubCommits, 10000)
+	if err != nil {
+		return 0, err
+	}
+	targetDay := occurredAt.In(appLocation()).Format("2006-01-02")
+	count := 0
+	for _, item := range items {
+		if !strings.EqualFold(stringValue(item["authorLogin"]), login) {
+			continue
+		}
+		if amountValue(map[string]any{"amount": item["rewardedPoints"]}) <= 0 {
+			continue
+		}
+		commit := githubCommitItem{}
+		if err := decodeRecord(item, &commit); err != nil {
+			return 0, err
+		}
+		if commit.OccurredAt.In(appLocation()).Format("2006-01-02") == targetDay {
+			count++
+		}
 	}
 	return count, nil
 }
@@ -1975,11 +2069,13 @@ func commitLevel(count int) int {
 
 func commitStats(commits []githubCommitItem, groupBy string) []map[string]any {
 	counts := map[string]int{}
+	rewards := map[string]int{}
 	labels := map[string]string{}
 	now := time.Now().In(appLocation())
 	for _, commit := range commits {
 		period, label := commitPeriod(commit.OccurredAt, groupBy)
 		counts[period]++
+		rewards[period] += commit.RewardPoints
 		labels[period] = label
 	}
 	periods := make([]string, 0, len(counts))
@@ -1991,7 +2087,7 @@ func commitStats(commits []githubCommitItem, groupBy string) []map[string]any {
 	currentPeriod, _ := commitPeriod(now, groupBy)
 	for _, period := range periods {
 		count := counts[period]
-		out = append(out, map[string]any{"period": period, "label": labels[period], "commitCount": count, "rewardedPoints": count * 10, "current": period == currentPeriod})
+		out = append(out, map[string]any{"period": period, "label": labels[period], "commitCount": count, "rewardedPoints": rewards[period], "current": period == currentPeriod})
 	}
 	return out
 }
@@ -3780,7 +3876,7 @@ func (c *githubOAuthClient) RepositoryCommits(ctx context.Context, accessToken, 
 				AuthorLogin:  authorLogin,
 				OccurredAt:   item.Commit.Author.Date,
 				HTMLURL:      item.HTMLURL,
-				RewardPoints: 10,
+				RewardPoints: commitRewardPoints,
 			})
 		}
 		if len(response) < 100 {
