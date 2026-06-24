@@ -1,0 +1,14 @@
+[tools]
+go = "1.26.1"
+
+[tasks.dev]
+description = "Start the Go API server"
+run = "go run ./cmd/server"
+
+[tasks.test]
+description = "Run Go tests"
+run = "go test ./..."
+
+[tasks.fmt]
+description = "Format Go files"
+run = "gofmt -w cmd/server/*.go"
