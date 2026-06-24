@@ -1875,6 +1875,24 @@ func (s *server) worldcupMatches(ctx context.Context) ([]worldcupMatch, error) {
 	return matches, nil
 }
 
+func (s *server) worldcupMatchByID(ctx context.Context, id string) (worldcupMatch, bool, error) {
+	if m, err := s.football.Fixture(ctx, id); err == nil {
+		return m, true, nil
+	} else if errors.Is(err, errFootballNotConfigured) {
+		return worldcupMatch{}, false, err
+	}
+	matches, err := s.worldcupMatches(ctx)
+	if err != nil {
+		return worldcupMatch{}, false, err
+	}
+	for _, m := range matches {
+		if m.ID == id || strconv.Itoa(m.ExternalID) == id {
+			return m, true, nil
+		}
+	}
+	return worldcupMatch{}, false, nil
+}
+
 func groupMatchDays(matches []worldcupMatch) []map[string]any {
 	byDay := map[string][]worldcupMatch{}
 	order := []string{}
@@ -1928,6 +1946,11 @@ func groupMatchDays(matches []worldcupMatch) []map[string]any {
 
 func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request) {
 	matchID := r.PathValue("matchId")
+	match, matchStatusKnown, err := s.worldcupMatchByID(r.Context(), matchID)
+	if err != nil {
+		s.failFootball(w, r, err)
+		return
+	}
 	items, _, ok := s.listStoredRecords(w, r, domainWorldcupPredictions, 1000, recordFilter{Field: "matchId", Value: matchID})
 	if !ok {
 		return
@@ -1957,8 +1980,12 @@ func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request)
 		"drawPercent":  percent(counts["draw"]),
 		"awayPercent":  percent(counts["away"]),
 		"totalCount":   total,
-		"canPredict":   myPrediction == "",
+		"canPredict":   myPrediction == "" && (!matchStatusKnown || match.Status == "scheduled"),
 		"myPrediction": nil,
+	}
+	if matchStatusKnown {
+		data["matchStatus"] = match.Status
+		data["matchStatusLabel"] = match.StatusLabel
 	}
 	if myPrediction != "" {
 		data["myPrediction"] = myPrediction
@@ -1980,6 +2007,15 @@ func (s *server) handlePredictionCreate(w http.ResponseWriter, r *http.Request) 
 	pick := stringValue(body["pick"])
 	if pick != "home" && pick != "draw" && pick != "away" {
 		s.fail(w, r, http.StatusBadRequest, "INVALID_PREDICTION_PICK", "pick은 home, draw, away 중 하나여야 합니다.", map[string]any{"pick": pick})
+		return
+	}
+	match, matchStatusKnown, err := s.worldcupMatchByID(r.Context(), matchID)
+	if err != nil {
+		s.failFootball(w, r, err)
+		return
+	}
+	if matchStatusKnown && match.Status != "scheduled" {
+		s.fail(w, r, http.StatusConflict, "PREDICTION_CLOSED", "이미 시작했거나 종료된 경기는 투표할 수 없습니다.", map[string]any{"matchId": matchID, "status": match.Status, "statusLabel": match.StatusLabel})
 		return
 	}
 	body["matchId"] = matchID
