@@ -11,4 +11,4 @@ run = "go test ./..."
 
 [tasks.fmt]
 description = "Format Go files"
-run = "gofmt -w cmd/server/*.go"
+run = "gofmt -w cmd/server/*.go internal/server/*.go"

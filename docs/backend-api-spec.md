@@ -44,20 +44,11 @@ DATABASE_URL=postgres://daema:daema@localhost:5432/daema_coin?sslmode=disable
 
 ### 1.4 저장 방식
 
-현재 서버는 PostgreSQL `records` 테이블에 도메인별 JSONB 레코드를 저장한다.
+프로덕션 대상 스키마는 정규화된 PostgreSQL 테이블을 사용한다. 핵심 테이블은 `internal_accounts`, `customer_profiles`, `github_identities`, `wallet_accounts`, `ledger_transactions`, `booths`, `products`, `orders`, `payment_intents`, `payments`, `worldcup_predictions`, `prediction_settlements`, `audit_logs`다.
 
-```sql
-CREATE TABLE IF NOT EXISTS records (
-  domain TEXT NOT NULL,
-  id TEXT NOT NULL,
-  data JSONB NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (domain, id)
-);
-```
+레거시 JSONB 데이터가 있는 운영 DB는 `0002_backfill_legacy_resources_to_core_schema.sql`과 `0003_application_resource_tables.sql`로 도메인 테이블에 흡수한다. 신규 런타임 읽기/쓰기 경로는 도메인별 repository와 프로덕션 명명 테이블만 사용한다.
 
-서버는 샘플 데이터를 자동 주입하지 않는다. 빈 배열, `null`, 0 집계는 DB에 해당 레코드가 없다는 의미다.
+내부 계정, 인증 세션, OAuth state, 학생 프로필, GitHub identity, 지갑 잔액, 원장 트랜잭션은 정규화 테이블로 처리한다. 지갑 변경은 원장 insert와 잔액 갱신을 하나의 PostgreSQL 트랜잭션으로 처리하고, 동일 idempotency key 재처리는 잔액을 다시 변경하지 않는다.
 
 ## 2. 환경 변수
 
@@ -83,12 +74,9 @@ CREATE TABLE IF NOT EXISTS records (
 | `GITHUB_APP_INSTALL_ON_LOGIN` | N | `true` | 고객 GitHub 로그인 후 미설치 상태면 GitHub App 설치 화면으로 redirect |
 | `GITHUB_WEBHOOK_SECRET` | Y | GitHub App webhook secret | webhook 서명 검증 secret |
 | `AUTH_SUCCESS_REDIRECT_URL` | N | `http://localhost:5173/login` | 고객 OAuth 성공 redirect |
-| `SELLER_AUTH_SUCCESS_REDIRECT_URL` | N | `http://localhost:5174/` | 셀러 OAuth 성공 redirect |
-| `GITHUB_OAUTH_SELLER_LOGINS` | N | comma-separated logins | 셀러 권한 allowlist |
-| `GITHUB_OAUTH_SELLER_EMAILS` | N | comma-separated emails | 셀러 권한 allowlist |
-| `GITHUB_OAUTH_ADMIN_LOGINS` | N | comma-separated logins | 관리자 권한 allowlist |
-| `GITHUB_OAUTH_ADMIN_EMAILS` | N | comma-separated emails | 관리자 권한 allowlist |
-| `GITHUB_OAUTH_TRUST_REQUESTED_ROLE` | N | `false` | 로컬 개발용 role trust |
+| `BOOTSTRAP_ADMIN_LOGIN` | N | empty | 최초 관리자 내부 계정 ID |
+| `BOOTSTRAP_ADMIN_PASSWORD` | N | empty | 최초 관리자 내부 계정 비밀번호 |
+| `INTERNAL_SESSION_TTL` | N | `12h` | 관리자/부스 내부 계정 세션 TTL |
 | `API_FOOTBALL_KEY` | Y | API-FOOTBALL key | 경기 데이터 조회 key |
 | `API_FOOTBALL_BASE_URL` | N | `https://v3.football.api-sports.io` | API-FOOTBALL base URL |
 | `API_FOOTBALL_TIMEZONE` | N | `Asia/Seoul` | 경기 시간대 |
@@ -127,12 +115,13 @@ http://localhost:8080/api/auth/github/callback
 8. 학생 프로필이 없으면 `profile_required`, 있으면 `authenticated`
 9. 학생 정보 입력 후 `PUT /api/auth/me/student-profile`
 
-### 3.3 셀러 로그인 흐름
+### 3.3 관리자/부스 내부 계정 흐름
 
-1. `POST /api/auth/seller/login`
-2. 응답의 `authorizeUrl`로 이동
-3. OAuth 성공 후 `SELLER_AUTH_SUCCESS_REDIRECT_URL`로 redirect
-4. 셀러 권한은 GitHub login/email allowlist 또는 `GITHUB_OAUTH_TRUST_REQUESTED_ROLE=true`로 부여
+1. 최초 실행 시 `BOOTSTRAP_ADMIN_LOGIN`, `BOOTSTRAP_ADMIN_PASSWORD`로 관리자 계정을 생성한다.
+2. 관리자는 `POST /api/auth/admin/login`으로 로그인한다.
+3. 관리자는 `POST /api/admin/accounts`로 부스 계정을 발급한다.
+4. 부스 계정은 `POST /api/auth/seller/login`에 내부 계정 ID/PW를 보내 로그인한다.
+5. 부스 API는 세션의 `boothId`와 경로의 `boothId`가 일치해야 접근할 수 있다.
 
 ## 4. 공통 응답
 
@@ -204,7 +193,7 @@ http://localhost:8080/api/auth/github/callback
 | `GET` | `/api/search/suggestions` | 검색 제안 목록 |
 | `GET` | `/api/search` | 통합 검색 |
 
-신규 사용자가 학생 프로필을 처음 저장하면 대마코인(`DMC`) 40,000개와 대마포인트(`POINT`) 10,000개를 지급하고 `wallet_balances`, `ledger_transactions`에 기록한다.
+신규 사용자가 학생 프로필을 처음 저장하면 대마코인(`DMC`) 40,000개와 대마포인트(`POINT`) 10,000개를 지급하고 `wallet_accounts`, `ledger_transactions`에 기록한다. 보상 원장과 잔액 갱신은 같은 DB 트랜잭션에서 처리한다.
 
 ## 6. 고객 API
 
@@ -226,6 +215,8 @@ http://localhost:8080/api/auth/github/callback
 | `GET` | `/api/customer/rankings` | 고객/부스 랭킹 |
 | `GET` | `/api/customer/festival/banner` | 축제 배너 |
 | `GET` | `/api/customer/schedules/highlight` | 축제 일정 하이라이트 |
+
+`/api/customer/rankings?type=user`는 `wallet_accounts`의 `POINT` 잔액을 기준으로 개인 대마포인트 랭킹을 계산해 반환한다.
 
 ### 6.2 결제/부스/주문
 
@@ -372,7 +363,8 @@ Query:
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| `POST` | `/api/auth/seller/login` | 셀러 GitHub OAuth 시작 URL 생성 |
+| `POST` | `/api/auth/admin/login` | 관리자 내부 계정 로그인 |
+| `POST` | `/api/auth/seller/login` | 부스 내부 계정 로그인 |
 | `POST` | `/api/auth/seller/logout` | 로그아웃 |
 | `GET` | `/api/seller/me` | 셀러 프로필 |
 | `GET` | `/api/seller/booths` | 셀러 부스 목록 |
@@ -423,6 +415,10 @@ Query:
 | Method | Path | 설명 |
 | --- | --- | --- |
 | `GET` | `/api/admin/dashboard` | 관리자 대시보드 |
+| `GET` | `/api/admin/accounts` | 내부 계정 목록 |
+| `POST` | `/api/admin/accounts` | 관리자/부스 내부 계정 생성 |
+| `PATCH` | `/api/admin/accounts/{accountId}` | 내부 계정 수정 |
+| `POST` | `/api/admin/accounts/{accountId}/reset-password` | 내부 계정 비밀번호 초기화 |
 | `GET` | `/api/admin/festivals` | 축제 목록 |
 | `POST` | `/api/admin/festivals` | 축제 생성 |
 | `PATCH` | `/api/admin/festivals/{festivalId}` | 축제 수정 |
@@ -505,6 +501,6 @@ curl http://localhost:8080/api/admin/system/health
 - `.env`는 git에 커밋하지 않는다.
 - GitHub OAuth secret, API-FOOTBALL key는 `.env.example`에 적지 않는다.
 - private repository commit 조회를 위해 GitHub OAuth scope에 `repo`가 필요하다.
-- 운영에서는 `GITHUB_OAUTH_TRUST_REQUESTED_ROLE=false`를 유지한다.
-- 셀러/관리자 권한은 GitHub login/email allowlist로 부여한다.
+- GitHub OAuth는 고객 로그인 전용이며 관리자/부스 권한을 부여하지 않는다.
+- 관리자 계정만 bootstrap env로 만들고, 부스 계정은 관리자가 내부 계정 API로 발급한다.
 - API-FOOTBALL 경기 데이터는 fallback 없이 upstream 결과만 사용한다.
