@@ -2785,7 +2785,7 @@ func (s *server) handlePredictionCancel(w http.ResponseWriter, r *http.Request) 
 		s.fail(w, r, http.StatusConflict, "PREDICTION_CANCEL_FAILED", "환급할 투표 금액을 확인할 수 없습니다.", map[string]any{"matchId": matchID})
 		return
 	}
-	_, err = s.createLedgerAndAdjustWallet(r.Context(), session.User, ledgerID("prediction-cancel", matchID, session.User.ID, strconv.FormatInt(time.Now().UTC().UnixNano(), 10)), "worldcup-prediction-cancel", "income", predictionCurrency, stakeAmount, map[string]any{
+	_, err = s.createLedgerAndAdjustWallet(r.Context(), session.User, ledgerID("prediction-cancel", matchID, session.User.ID), "worldcup-prediction-cancel", "income", predictionCurrency, stakeAmount, map[string]any{
 		"matchId":     matchID,
 		"pick":        stringValue(existing["pick"]),
 		"stakeAmount": stakeAmount,
