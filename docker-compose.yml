@@ -17,5 +17,20 @@ services:
       timeout: 3s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    container_name: daema-coin-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - daema_coin_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   daema_coin_postgres_data:
+  daema_coin_redis_data:

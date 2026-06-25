@@ -54,9 +54,10 @@ type pagination struct {
 }
 
 type server struct {
-	store      *postgresStore
-	football   *footballClient
-	githubAuth *githubOAuthClient
+	store         *postgresStore
+	football      *footballClient
+	footballCache *redisFootballCache
+	githubAuth    *githubOAuthClient
 }
 
 func Run(ctx context.Context) error {
@@ -70,13 +71,23 @@ func Run(ctx context.Context) error {
 	}
 	defer store.close()
 
+	footballCache, err := openRedisFootballCache(ctx)
+	if err != nil {
+		return fmt.Errorf("open football cache: %w", err)
+	}
+	defer footballCache.close()
+
 	s := &server{
-		store:      store,
-		football:   newFootballClientFromEnv(),
-		githubAuth: newGitHubOAuthClientFromEnv(),
+		store:         store,
+		football:      newFootballClientFromEnv(),
+		footballCache: footballCache,
+		githubAuth:    newGitHubOAuthClientFromEnv(),
 	}
 	if err := s.ensureBootstrapAccounts(ctx); err != nil {
 		return fmt.Errorf("bootstrap internal accounts: %w", err)
+	}
+	if envBool("API_FOOTBALL_CACHE_WORKER_ENABLED", true) {
+		go s.runFootballCacheWorker(ctx, envDuration("API_FOOTBALL_CACHE_REFRESH_INTERVAL", time.Minute))
 	}
 	if envBool("PREDICTION_SETTLEMENT_WORKER_ENABLED", true) {
 		go s.runPredictionSettlementWorker(ctx, envDuration("PREDICTION_SETTLEMENT_INTERVAL", time.Minute))
@@ -2690,43 +2701,34 @@ func (s *server) handleWorldcupMatches(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleWorldcupMatch(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("matchId")
-	if m, err := s.football.Fixture(r.Context(), id); err == nil {
-		s.ok(w, r, m)
-		return
-	} else if errors.Is(err, errFootballNotConfigured) {
-		s.failFootball(w, r, err)
-		return
-	}
-	matches, err := s.worldcupMatches(r.Context())
+	match, ok, err := s.worldcupMatchByID(r.Context(), id)
 	if err != nil {
 		s.failFootball(w, r, err)
 		return
 	}
-	for _, m := range matches {
-		if m.ID == id || strconv.Itoa(m.ExternalID) == id {
-			s.ok(w, r, m)
-			return
-		}
+	if ok {
+		s.ok(w, r, match)
+		return
 	}
 	s.fail(w, r, http.StatusNotFound, "MATCH_NOT_FOUND", "경기를 찾을 수 없습니다.", nil)
 }
 
 func (s *server) worldcupMatches(ctx context.Context) ([]worldcupMatch, error) {
-	matches, err := s.football.Fixtures(ctx)
+	matches, ok, err := s.footballCache.fixtures(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(matches) == 0 {
-		return nil, errors.New("API-FOOTBALL 경기 데이터가 비어 있습니다")
+	if !ok || len(matches) == 0 {
+		return nil, errors.New("API-FOOTBALL 경기 캐시가 비어 있습니다")
 	}
 	return matches, nil
 }
 
 func (s *server) worldcupMatchByID(ctx context.Context, id string) (worldcupMatch, bool, error) {
-	if m, err := s.football.Fixture(ctx, id); err == nil {
-		return m, true, nil
-	} else if errors.Is(err, errFootballNotConfigured) {
-		return worldcupMatch{}, false, err
+	if isNumeric(id) {
+		if match, ok, err := s.footballCache.fixture(ctx, id); err != nil || ok {
+			return match, ok, err
+		}
 	}
 	matches, err := s.worldcupMatches(ctx)
 	if err != nil {
@@ -2971,7 +2973,7 @@ func (s *server) handlePredictionCancel(w http.ResponseWriter, r *http.Request) 
 
 func (s *server) handleWorldcupStats(w http.ResponseWriter, r *http.Request) {
 	matchID := r.PathValue("matchId")
-	if stats, err := s.football.Stats(r.Context(), matchID); err == nil && len(stats) > 0 {
+	if stats, ok, err := s.footballCache.stats(r.Context(), matchID); err == nil && ok && len(stats) > 0 {
 		s.ok(w, r, stats)
 		return
 	} else if err != nil {
@@ -2983,7 +2985,7 @@ func (s *server) handleWorldcupStats(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleWorldcupLineups(w http.ResponseWriter, r *http.Request) {
 	matchID := r.PathValue("matchId")
-	if lineups, err := s.football.Lineups(r.Context(), matchID); err == nil && len(lineups) > 0 {
+	if lineups, ok, err := s.footballCache.lineups(r.Context(), matchID); err == nil && ok && len(lineups) > 0 {
 		s.ok(w, r, lineups)
 		return
 	} else if err != nil {
@@ -4326,14 +4328,18 @@ func (s *server) handleAdminAuditLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleAdminSystemHealth(w http.ResponseWriter, r *http.Request) {
 	footballStatus := "not_configured"
-	if s.football.apiKey != "" {
+	if s.football.Configured() {
 		footballStatus = "configured"
 	}
 	databaseStatus := "ok"
 	if err := s.store.health(r.Context()); err != nil {
 		databaseStatus = "unavailable"
 	}
-	s.ok(w, r, map[string]any{"api": "ok", "database": databaseStatus, "payments": "not_configured", "apiFootball": footballStatus, "checkedAt": time.Now().Format(time.RFC3339)})
+	footballCacheStatus := "ok"
+	if err := s.footballCache.health(r.Context()); err != nil {
+		footballCacheStatus = "unavailable"
+	}
+	s.ok(w, r, map[string]any{"api": "ok", "database": databaseStatus, "payments": "not_configured", "apiFootball": footballStatus, "apiFootballCache": footballCacheStatus, "checkedAt": time.Now().Format(time.RFC3339)})
 }
 
 func (s *server) handleAdminSystemJobs(w http.ResponseWriter, r *http.Request) {
