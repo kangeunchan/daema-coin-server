@@ -27,12 +27,16 @@ func openPostgresStore(ctx context.Context, dsn string) (*postgresStore, error) 
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(30 * time.Minute)
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		if closeErr := db.Close(); closeErr != nil {
+			return nil, fmt.Errorf("%w; close database: %v", err, closeErr)
+		}
 		return nil, err
 	}
 	store := &postgresStore{db: db}
 	if err := store.migrate(ctx); err != nil {
-		db.Close()
+		if closeErr := db.Close(); closeErr != nil {
+			return nil, fmt.Errorf("%w; close database: %v", err, closeErr)
+		}
 		return nil, err
 	}
 	return store, nil

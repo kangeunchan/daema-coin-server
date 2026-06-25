@@ -295,20 +295,46 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/admin/incidents", s.handleAdminIncidentCreate)
 	mux.HandleFunc("POST /api/admin/ranking-rules", s.handleAccepted)
 
-	return corsMiddleware(s.authzMiddleware(mux))
+	return corsMiddleware(csrfMiddleware(s.authzMiddleware(mux)))
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", env("CORS_ALLOW_ORIGIN", "*"))
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-Id")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin != "" {
+			w.Header().Add("Vary", "Origin")
+			if isAllowedOrigin(origin) {
+				w.Header().Set("Access-Control-Allow-Origin", normalizeOrigin(origin))
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-Id, X-CSRF-Token")
+				w.Header().Set("Access-Control-Max-Age", "600")
+			} else if r.Method == http.MethodOptions {
+				writeJSON(w, r, http.StatusForbidden, apiError{
+					Error: errorBody{Code: "CORS_ORIGIN_DENIED", Message: "허용되지 않은 origin입니다."},
+					Meta:  meta(r, nil),
+				})
+				return
+			}
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+func csrfMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isSafeMethod(r.Method) || bearerToken(r) != "" || requestOriginAllowed(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		writeJSON(w, r, http.StatusForbidden, apiError{
+			Error: errorBody{Code: "CSRF_ORIGIN_DENIED", Message: "허용되지 않은 origin의 변경 요청입니다."},
+			Meta:  meta(r, nil),
+		})
 	})
 }
 
@@ -384,6 +410,114 @@ func envDuration(key string, defaultValue time.Duration) time.Duration {
 		return defaultValue
 	}
 	return duration
+}
+
+func envInt64(key string, defaultValue int64) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return defaultValue
+	}
+	return parsed
+}
+
+func maxJSONBodyBytes() int64 {
+	return envInt64("HTTP_MAX_JSON_BODY_BYTES", 1<<20)
+}
+
+func isSafeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	default:
+		return false
+	}
+}
+
+func configuredCORSOrigins() map[string]bool {
+	raw := firstNonEmpty(os.Getenv("CORS_ALLOW_ORIGINS"), os.Getenv("CORS_ALLOW_ORIGIN"))
+	if raw == "" {
+		raw = env("PUBLIC_BASE_URL", "http://localhost:5173")
+	}
+	return originSet(raw)
+}
+
+func redirectAllowedOrigins() map[string]bool {
+	values := []string{
+		env("PUBLIC_BASE_URL", "http://localhost:5173"),
+		env("AUTH_SUCCESS_REDIRECT_URL", env("PUBLIC_BASE_URL", "http://localhost:5173")+"/login"),
+		os.Getenv("CORS_ALLOW_ORIGINS"),
+		os.Getenv("CORS_ALLOW_ORIGIN"),
+	}
+	return originSet(strings.Join(values, ","))
+}
+
+func originSet(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, value := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t'
+	}) {
+		if value == "*" {
+			continue
+		}
+		if origin := normalizeOrigin(value); origin != "" {
+			out[origin] = true
+		}
+	}
+	return out
+}
+
+func normalizeOrigin(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+}
+
+func isAllowedOrigin(origin string) bool {
+	normalized := normalizeOrigin(origin)
+	return normalized != "" && configuredCORSOrigins()[normalized]
+}
+
+func requestOriginAllowed(r *http.Request) bool {
+	origin := normalizeOrigin(r.Header.Get("Origin"))
+	if origin == "" {
+		origin = normalizeOrigin(r.Header.Get("Referer"))
+	}
+	if origin == "" {
+		return true
+	}
+	return configuredCORSOrigins()[origin]
+}
+
+func safeRedirectURL(raw string) string {
+	fallback := env("AUTH_SUCCESS_REDIRECT_URL", env("PUBLIC_BASE_URL", "http://localhost:5173")+"/login")
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return fallback
+	}
+	if strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//") && !strings.Contains(value, "\\") {
+		return value
+	}
+	u, err := url.Parse(value)
+	if err != nil || !u.IsAbs() || u.Host == "" {
+		return fallback
+	}
+	if redirectAllowedOrigins()[normalizeOrigin(value)] {
+		return value
+	}
+	return fallback
 }
 
 func amount(currency string, value int) map[string]any {
@@ -491,7 +625,7 @@ func (s *server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 
 	state := randomToken()
 	role := roleCustomer
-	redirectAfter := envDefault(r.URL.Query().Get("redirectAfter"), env("AUTH_SUCCESS_REDIRECT_URL", env("PUBLIC_BASE_URL", "http://localhost:5173")+"/login"))
+	redirectAfter := safeRedirectURL(r.URL.Query().Get("redirectAfter"))
 
 	expiresAt := time.Now().Add(10 * time.Minute)
 	if err := s.store.saveOAuthState(r.Context(), oauthState{Value: state, Role: role, RedirectAfter: redirectAfter, ExpiresAt: expiresAt}); err != nil {
@@ -525,6 +659,7 @@ func (s *server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, installURL, http.StatusFound)
 		return
 	}
+	// #nosec G710 -- redirectURL is constrained by safeRedirectURL before it is stored in OAuth state.
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
@@ -832,32 +967,13 @@ func sessionCookie(value string, expires time.Time, maxAge int) *http.Cookie {
 		Expires:  expires,
 		MaxAge:   maxAge,
 		HttpOnly: true,
-		SameSite: sessionCookieSameSite(),
-		Secure:   sessionCookieSecure(),
+		SameSite: http.SameSiteLaxMode,
+		Secure:   true,
 	}
 	if domain := env("SESSION_COOKIE_DOMAIN", ""); domain != "" {
 		cookie.Domain = domain
 	}
 	return cookie
-}
-
-func sessionCookieSameSite() http.SameSite {
-	switch strings.ToLower(env("SESSION_COOKIE_SAMESITE", "lax")) {
-	case "none":
-		return http.SameSiteNoneMode
-	case "strict":
-		return http.SameSiteStrictMode
-	default:
-		return http.SameSiteLaxMode
-	}
-}
-
-func sessionCookieSecure() bool {
-	value := strings.TrimSpace(os.Getenv("SESSION_COOKIE_SECURE"))
-	if value != "" {
-		return envBool("SESSION_COOKIE_SECURE", false)
-	}
-	return strings.HasPrefix(env("GITHUB_OAUTH_REDIRECT_URI", ""), "https://") || strings.HasPrefix(env("PUBLIC_BASE_URL", ""), "https://")
 }
 
 func bearerToken(r *http.Request) string {
@@ -882,6 +998,10 @@ func (s *server) authzMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			if !s.requireBoothScope(w, r, session) {
+				return
+			}
+		case strings.HasPrefix(path, "/api/customer/"):
+			if _, ok := s.requireRole(w, r, roleCustomer); !ok {
 				return
 			}
 		}
@@ -1205,10 +1325,11 @@ func (s *server) deleteResource(w http.ResponseWriter, r *http.Request, domain, 
 }
 
 func (s *server) requestPayload(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
-	defer r.Body.Close()
 	if r.Body == nil {
 		return map[string]any{}, true
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes())
+	defer r.Body.Close()
 	var payload any
 	decoder := json.NewDecoder(r.Body)
 	decoder.UseNumber()
@@ -1216,7 +1337,25 @@ func (s *server) requestPayload(w http.ResponseWriter, r *http.Request) (map[str
 		if errors.Is(err, io.EOF) || errors.Is(err, http.ErrBodyReadAfterClose) {
 			return map[string]any{}, true
 		}
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			s.fail(w, r, http.StatusRequestEntityTooLarge, "REQUEST_BODY_TOO_LARGE", "요청 본문이 너무 큽니다.", map[string]any{"limit": maxBytesErr.Limit})
+			return nil, false
+		}
 		s.fail(w, r, http.StatusBadRequest, "INVALID_REQUEST", "요청 본문을 읽을 수 없습니다.", map[string]any{"cause": err.Error()})
+		return nil, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != nil && !errors.Is(err, io.EOF) {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			s.fail(w, r, http.StatusRequestEntityTooLarge, "REQUEST_BODY_TOO_LARGE", "요청 본문이 너무 큽니다.", map[string]any{"limit": maxBytesErr.Limit})
+			return nil, false
+		}
+		s.fail(w, r, http.StatusBadRequest, "INVALID_REQUEST", "요청 본문을 읽을 수 없습니다.", map[string]any{"cause": err.Error()})
+		return nil, false
+	} else if err == nil {
+		s.fail(w, r, http.StatusBadRequest, "INVALID_REQUEST", "JSON 본문에는 하나의 값만 포함할 수 있습니다.", nil)
 		return nil, false
 	}
 	if payload == nil {
@@ -1287,6 +1426,20 @@ func filterResources(items []map[string]any, query string, filters ...resourceFi
 		}
 	}
 	return out
+}
+
+func resourceBelongsToUser(item map[string]any, userID string) bool {
+	if userID == "" {
+		return false
+	}
+	return firstNonEmpty(stringValue(item["userId"]), stringValue(item["customerId"])) == userID
+}
+
+func resourceBelongsToBooth(item map[string]any, boothID string) bool {
+	if boothID == "" {
+		return false
+	}
+	return stringValue(item["boothId"]) == boothID
 }
 
 func resourceContains(value any, query string) bool {
@@ -1858,6 +2011,19 @@ func (s *server) handleOrderDetail(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusNotFound, "ORDER_NOT_FOUND", "주문을 찾을 수 없습니다.", map[string]any{"orderId": id})
 		return
 	}
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		s.fail(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "로그인이 필요합니다.", nil)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/customer/") && !resourceBelongsToUser(item, session.User.ID) {
+		s.fail(w, r, http.StatusNotFound, "ORDER_NOT_FOUND", "주문을 찾을 수 없습니다.", map[string]any{"orderId": id})
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/seller/") && !resourceBelongsToBooth(item, session.User.BoothID) {
+		s.fail(w, r, http.StatusForbidden, "BOOTH_SCOPE_REQUIRED", "해당 주문에 접근할 권한이 없습니다.", map[string]any{"orderId": id})
+		return
+	}
 	s.ok(w, r, item)
 }
 
@@ -1870,7 +2036,6 @@ func (s *server) handleFavorite(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleFavoriteDelete(w http.ResponseWriter, r *http.Request) {
 	targetID := r.PathValue("targetId")
-	_ = s.deleteResource(w, r, resourceFavorites, targetID)
 	items, _, ok := s.listResources(w, r, resourceFavorites, 100, resourceFilter{Field: "targetId", Value: targetID}, resourceFilter{Field: "userId", Value: s.currentUserID(r)})
 	if !ok {
 		return
@@ -1991,7 +2156,7 @@ func (s *server) handleGitHubAppInstallation(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
-	redirectURL := env("AUTH_SUCCESS_REDIRECT_URL", env("PUBLIC_BASE_URL", "http://localhost:5173")+"/login")
+	redirectURL := safeRedirectURL(env("AUTH_SUCCESS_REDIRECT_URL", env("PUBLIC_BASE_URL", "http://localhost:5173")+"/login"))
 	session, ok := s.sessionFromRequest(r)
 	if !ok {
 		http.Redirect(w, r, appendQuery(redirectURL, map[string]string{"login": "required", "githubApp": "setup"}), http.StatusFound)
@@ -3434,14 +3599,33 @@ func (s *server) handleSellerProducts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleSellerProduct(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		s.fail(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "부스 계정 로그인이 필요합니다.", nil)
+		return
+	}
+	productID := r.PathValue("productId")
+	product, found, err := s.store.get(r.Context(), resourceProducts, productID)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "상품을 읽지 못했습니다.", map[string]any{"productId": productID, "cause": err.Error()})
+		return
+	}
+	if !found {
+		s.fail(w, r, http.StatusNotFound, "PRODUCT_NOT_FOUND", "상품을 찾을 수 없습니다.", map[string]any{"productId": productID})
+		return
+	}
+	if !resourceBelongsToBooth(product, session.User.BoothID) {
+		s.fail(w, r, http.StatusForbidden, "BOOTH_SCOPE_REQUIRED", "해당 상품에 접근할 권한이 없습니다.", map[string]any{"productId": productID})
+		return
+	}
 	if r.Method == http.MethodPatch {
-		item, ok := s.updateResource(w, r, resourceProducts, r.PathValue("productId"), map[string]any{"sellerId": s.currentUserID(r)})
+		item, ok := s.updateResource(w, r, resourceProducts, productID, map[string]any{"sellerId": s.currentUserID(r), "boothId": session.User.BoothID})
 		if ok {
 			s.ok(w, r, item)
 		}
 		return
 	}
-	s.handleBoothProduct(w, r)
+	s.ok(w, r, product)
 }
 
 func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
@@ -3450,6 +3634,24 @@ func (s *server) handleInventory(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handlePurchaseLimits(w http.ResponseWriter, r *http.Request) {
 	productID := r.PathValue("productId")
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		s.fail(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "부스 계정 로그인이 필요합니다.", nil)
+		return
+	}
+	product, found, err := s.store.get(r.Context(), resourceProducts, productID)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "상품을 읽지 못했습니다.", map[string]any{"productId": productID, "cause": err.Error()})
+		return
+	}
+	if !found {
+		s.fail(w, r, http.StatusNotFound, "PRODUCT_NOT_FOUND", "상품을 찾을 수 없습니다.", map[string]any{"productId": productID})
+		return
+	}
+	if !resourceBelongsToBooth(product, session.User.BoothID) {
+		s.fail(w, r, http.StatusForbidden, "BOOTH_SCOPE_REQUIRED", "해당 상품에 접근할 권한이 없습니다.", map[string]any{"productId": productID})
+		return
+	}
 	if r.Method == http.MethodPatch {
 		item, ok := s.putResource(w, r, resourcePurchaseLimits, productID, map[string]any{"productId": productID})
 		if ok {
@@ -3512,7 +3714,8 @@ func (s *server) handleBarcodeLookup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handlePaymentIntent(w http.ResponseWriter, r *http.Request) {
-	item, ok := s.createResource(w, r, resourcePaymentIntents, "payment-intent", map[string]any{"sellerId": s.currentUserID(r)}, "intentId")
+	session, _ := s.sessionFromRequest(r)
+	item, ok := s.createResource(w, r, resourcePaymentIntents, "payment-intent", map[string]any{"sellerId": s.currentUserID(r), "boothId": session.User.BoothID}, "intentId")
 	if ok {
 		s.created(w, r, item)
 	}
@@ -3579,6 +3782,15 @@ func (s *server) handleSettlement(w http.ResponseWriter, r *http.Request) {
 	}
 	if !found {
 		s.fail(w, r, http.StatusNotFound, "SETTLEMENT_NOT_FOUND", "정산을 찾을 수 없습니다.", map[string]any{"settlementId": id})
+		return
+	}
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		s.fail(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "부스 계정 로그인이 필요합니다.", nil)
+		return
+	}
+	if !resourceBelongsToBooth(item, session.User.BoothID) {
+		s.fail(w, r, http.StatusForbidden, "BOOTH_SCOPE_REQUIRED", "해당 정산에 접근할 권한이 없습니다.", map[string]any{"settlementId": id})
 		return
 	}
 	s.ok(w, r, item)
