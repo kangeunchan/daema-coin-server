@@ -228,3 +228,38 @@ func TestResourceOwnershipHelpers(t *testing.T) {
 		t.Fatal("resourceBelongsToBooth accepted another booth")
 	}
 }
+
+func TestShouldRefreshFootballDetails(t *testing.T) {
+	t.Setenv("APP_TIMEZONE", "Asia/Seoul")
+	t.Setenv("API_FOOTBALL_DETAIL_CACHE_BEFORE", "1h")
+	t.Setenv("API_FOOTBALL_DETAIL_CACHE_AFTER", "2h")
+
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, appLocation())
+	matchAt := func(status string, startsAt time.Time) worldcupMatch {
+		return worldcupMatch{Status: status, StartsAt: startsAt.Format(time.RFC3339)}
+	}
+
+	cases := []struct {
+		name  string
+		match worldcupMatch
+		want  bool
+	}{
+		{name: "live always refreshes", match: matchAt("live", now.Add(-24*time.Hour)), want: true},
+		{name: "scheduled inside before window", match: matchAt("scheduled", now.Add(30*time.Minute)), want: true},
+		{name: "scheduled outside before window", match: matchAt("scheduled", now.Add(2*time.Hour)), want: false},
+		{name: "finished inside after window", match: matchAt("finished", now.Add(-90*time.Minute)), want: true},
+		{name: "finished outside after window", match: matchAt("finished", now.Add(-3*time.Hour)), want: false},
+		{name: "invalid start time", match: worldcupMatch{Status: "scheduled", StartsAt: "bad"}, want: false},
+	}
+	for _, tc := range cases {
+		if got := shouldRefreshFootballDetails(tc.match, now); got != tc.want {
+			t.Fatalf("%s: shouldRefreshFootballDetails = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestFootballDetailRefreshIntervalDefault(t *testing.T) {
+	if got := footballDetailRefreshInterval(); got != 10*time.Minute {
+		t.Fatalf("footballDetailRefreshInterval = %s, want 10m", got)
+	}
+}

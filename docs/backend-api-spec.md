@@ -8,16 +8,17 @@
 
 ### 1.1 런타임
 
-- Language: Go `1.26.1`
+- Language: Go `1.26.4`
 - Runtime manager: mise
 - Database: PostgreSQL 16
+- Cache: Redis 7
 - External auth: GitHub OAuth
 - External football data: API-FOOTBALL
 
 ### 1.2 로컬 실행
 
 ```bash
-docker-compose up -d postgres
+docker-compose up -d postgres redis
 mise run dev
 ```
 
@@ -44,6 +45,25 @@ DATABASE_URL=postgres://daema:daema@localhost:5432/daema_coin?sslmode=disable
 
 ### 1.4 저장 방식
 
+### 1.4 Redis
+
+Docker Compose 서비스:
+
+| 항목 | 값 |
+| --- | --- |
+| service | `redis` |
+| image | `redis:7-alpine` |
+| container | `daema-coin-redis` |
+| port | `6379` |
+
+Redis 기본 URL:
+
+```env
+REDIS_URL=redis://localhost:6379/0
+```
+
+### 1.5 저장 방식
+
 프로덕션 대상 스키마는 정규화된 PostgreSQL 테이블을 사용한다. 핵심 테이블은 `internal_accounts`, `customer_profiles`, `github_identities`, `wallet_accounts`, `ledger_transactions`, `booths`, `products`, `orders`, `payment_intents`, `payments`, `worldcup_predictions`, `prediction_settlements`, `audit_logs`다.
 
 레거시 JSONB 데이터가 있는 운영 DB는 `0002_backfill_legacy_resources_to_core_schema.sql`과 `0003_application_resource_tables.sql`로 도메인 테이블에 흡수한다. 신규 런타임 읽기/쓰기 경로는 도메인별 repository와 프로덕션 명명 테이블만 사용한다.
@@ -60,6 +80,7 @@ DATABASE_URL=postgres://daema:daema@localhost:5432/daema_coin?sslmode=disable
 | `CORS_ALLOW_ORIGINS` | N | `http://localhost:5173,http://localhost:5174,http://localhost:5175` | 쿠키 인증 요청을 허용할 프론트 origin 목록 |
 | `PUBLIC_BASE_URL` | N | `http://localhost:5173` | 고객 프론트 기본 URL |
 | `DATABASE_URL` | Y | `postgres://daema:daema@localhost:5432/daema_coin?sslmode=disable` | PostgreSQL DSN |
+| `REDIS_URL` | Y | `redis://localhost:6379/0` | API-FOOTBALL 캐시 Redis URL |
 | `APP_TIMEZONE` | N | `Asia/Seoul` | 날짜 그룹/오늘 판단 기준 timezone |
 | `SESSION_COOKIE_DOMAIN` | N | empty | 세션 쿠키 domain override |
 | `HTTP_MAX_JSON_BODY_BYTES` | N | `1048576` | JSON API 요청 본문 최대 크기 |
@@ -83,6 +104,13 @@ DATABASE_URL=postgres://daema:daema@localhost:5432/daema_coin?sslmode=disable
 | `API_FOOTBALL_WORLDCUP_SEASON` | N | `2026` | 월드컵 시즌 |
 | `API_FOOTBALL_WORLDCUP_FROM` | N | `2026-06-11` | 경기 조회 시작일 |
 | `API_FOOTBALL_WORLDCUP_TO` | N | `2026-07-19` | 경기 조회 종료일 |
+| `API_FOOTBALL_CACHE_WORKER_ENABLED` | N | `true` | API-FOOTBALL Redis 캐시 갱신 워커 활성화 |
+| `API_FOOTBALL_CACHE_REFRESH_INTERVAL` | N | `1m` | 경기 목록/상세 캐시 갱신 워커 실행 주기 |
+| `API_FOOTBALL_CACHE_TTL` | N | `5m` | 경기 목록/상세 Redis 캐시 TTL |
+| `API_FOOTBALL_DETAIL_CACHE_REFRESH_INTERVAL` | N | `10m` | 스탯/라인업 상세 API 갱신 최소 간격 |
+| `API_FOOTBALL_DETAIL_CACHE_TTL` | N | `30m` | 스탯/라인업 상세 Redis 캐시 TTL |
+| `API_FOOTBALL_DETAIL_CACHE_BEFORE` | N | `3h` | 경기 시작 전 스탯/라인업 상세 캐시 갱신 구간 |
+| `API_FOOTBALL_DETAIL_CACHE_AFTER` | N | `4h` | 경기 시작 후 스탯/라인업 상세 캐시 갱신 구간 |
 
 ### 2.2 고객 프론트
 
@@ -306,6 +334,16 @@ Query:
 - 대마포인트 잔액이 부족하면 `400 INSUFFICIENT_POINT_BALANCE`로 거절한다.
 - 이미 시작했거나 종료된 경기는 `409 PREDICTION_CLOSED`로 거절한다.
 - 같은 사용자는 같은 경기에 한 번만 투표할 수 있다.
+
+API-FOOTBALL 캐시:
+
+- 사용자 요청 핸들러는 API-FOOTBALL을 직접 호출하지 않고 Redis 캐시만 읽는다.
+- `API_FOOTBALL_CACHE_REFRESH_INTERVAL` 간격의 워커가 경기 목록을 갱신한다.
+- 경기 시작 전후 상세 갱신 구간에 들어온 경기만 스탯/라인업을 갱신한다.
+- 스탯/라인업은 경기별로 `API_FOOTBALL_DETAIL_CACHE_REFRESH_INTERVAL` 간격을 지키며, 기본값은 10분이다.
+- 캐시 가능한 데이터는 API-FOOTBALL 원본 기반의 경기 목록, 경기 상세, 스탯, 라인업이다.
+- `myPrediction`, `canPredict`, `canCancel`, 지갑 잔액, 포인트 차감/환급, 예측/정산 결과처럼 사용자별 또는 DB 트랜잭션 상태가 섞인 값은 Redis 캐시에 저장하지 않는다.
+- 마지막 캐시 갱신 상태는 `GET /api/admin/system/jobs`의 `api-football-cache-refresh` 레코드에서 확인한다.
 
 승부예측 취소:
 
