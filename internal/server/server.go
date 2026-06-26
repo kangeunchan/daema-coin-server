@@ -3233,6 +3233,8 @@ func (s *server) handlePredictionCreate(w http.ResponseWriter, r *http.Request) 
 	body["githubLogin"] = session.User.Login
 	body["stakeAmount"] = stakeAmount
 	body["currency"] = predictionCurrency
+	stakeLedgerID := ledgerID("prediction-stake", matchID, session.User.ID, strconv.FormatInt(time.Now().UTC().UnixNano(), 10))
+	body["stakeLedgerId"] = stakeLedgerID
 	id := predictionID(matchID, session.User.ID)
 	item, created, err := s.store.create(r.Context(), resourceWorldcupPredictions, id, body)
 	if err != nil {
@@ -3244,11 +3246,12 @@ func (s *server) handlePredictionCreate(w http.ResponseWriter, r *http.Request) 
 		s.fail(w, r, http.StatusConflict, "PREDICTION_ALREADY_EXISTS", "이미 이 경기에 투표했습니다.", map[string]any{"matchId": matchID, "prediction": existing})
 		return
 	}
-	ledgerCreated, err := s.createLedgerAndAdjustWallet(r.Context(), session.User, ledgerID("prediction-stake", matchID, session.User.ID, strconv.FormatInt(time.Now().UTC().UnixNano(), 10)), "worldcup-prediction-stake", "expense", predictionCurrency, stakeAmount, map[string]any{
-		"matchId":     matchID,
-		"pick":        pick,
-		"stakeAmount": stakeAmount,
-		"description": "월드컵 승부예측 참여",
+	ledgerCreated, err := s.createLedgerAndAdjustWallet(r.Context(), session.User, stakeLedgerID, "worldcup-prediction-stake", "expense", predictionCurrency, stakeAmount, map[string]any{
+		"matchId":       matchID,
+		"pick":          pick,
+		"stakeAmount":   stakeAmount,
+		"stakeLedgerId": stakeLedgerID,
+		"description":   "월드컵 승부예측 참여",
 	})
 	if err != nil {
 		_ = s.store.delete(r.Context(), resourceWorldcupPredictions, id)
@@ -3294,15 +3297,23 @@ func (s *server) handlePredictionCancel(w http.ResponseWriter, r *http.Request) 
 		s.fail(w, r, http.StatusConflict, "PREDICTION_CANCEL_FAILED", "환급할 투표 금액을 확인할 수 없습니다.", map[string]any{"matchId": matchID})
 		return
 	}
-	_, err = s.createLedgerAndAdjustWallet(r.Context(), session.User, ledgerID("prediction-cancel", matchID, session.User.ID), "worldcup-prediction-cancel", "income", predictionCurrency, stakeAmount, map[string]any{
-		"matchId":     matchID,
-		"pick":        stringValue(existing["pick"]),
-		"stakeAmount": stakeAmount,
-		"description": "월드컵 승부예측 취소 환급",
+	refundLedgerID := predictionCancelLedgerID(matchID, session.User.ID, existing)
+	ledgerCreated, err := s.createLedgerAndAdjustWallet(r.Context(), session.User, refundLedgerID, "worldcup-prediction-cancel", "income", predictionCurrency, stakeAmount, map[string]any{
+		"matchId":        matchID,
+		"pick":           stringValue(existing["pick"]),
+		"stakeAmount":    stakeAmount,
+		"stakeLedgerId":  stringValue(existing["stakeLedgerId"]),
+		"refundLedgerId": refundLedgerID,
+		"description":    "월드컵 승부예측 취소 환급",
 	})
 	if err != nil {
 		_, _, _ = s.store.create(r.Context(), resourceWorldcupPredictions, id, existing)
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "승부예측 취소 환급에 실패했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	if !ledgerCreated {
+		_, _, _ = s.store.create(r.Context(), resourceWorldcupPredictions, id, existing)
+		s.fail(w, r, http.StatusConflict, "PREDICTION_CANCEL_ALREADY_REFUNDED", "승부예측 취소 환급 내역이 이미 존재합니다.", map[string]any{"matchId": matchID})
 		return
 	}
 	s.ok(w, r, map[string]any{
@@ -3340,6 +3351,13 @@ func (s *server) handleWorldcupLineups(w http.ResponseWriter, r *http.Request) {
 func predictionID(matchID, userID string) string {
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
 	return "prediction-" + replacer.Replace(matchID) + "-" + replacer.Replace(userID)
+}
+
+func predictionCancelLedgerID(matchID, userID string, prediction map[string]any) string {
+	if stakeLedgerID := stringValue(prediction["stakeLedgerId"]); stakeLedgerID != "" {
+		return ledgerID("prediction-cancel", stakeLedgerID)
+	}
+	return ledgerID("prediction-cancel", matchID, userID, firstNonEmpty(stringValue(prediction["createdAt"]), stringValue(prediction["id"])))
 }
 
 func predictionSettlementID(matchID string) string {
