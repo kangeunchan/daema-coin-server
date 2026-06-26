@@ -213,6 +213,73 @@ func TestRequestPayloadRejectsOversizedBodies(t *testing.T) {
 	}
 }
 
+func TestRequestIDMiddlewareKeepsStableRequestID(t *testing.T) {
+	var first string
+	var second string
+	handler := requestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		first = requestID(r)
+		second = requestID(r)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	handler.ServeHTTP(recorder, request)
+
+	if first == "" {
+		t.Fatal("request id was empty")
+	}
+	if first != second {
+		t.Fatalf("request id changed within one request: %q != %q", first, second)
+	}
+	if got := recorder.Header().Get("X-Request-Id"); got != first {
+		t.Fatalf("response request id = %q, want %q", got, first)
+	}
+}
+
+func TestRequestIDMiddlewarePreservesIncomingRequestID(t *testing.T) {
+	handler := requestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := requestID(r); got != "client-request-id" {
+			t.Fatalf("request id = %q, want incoming id", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.Header.Set("X-Request-Id", "client-request-id")
+	handler.ServeHTTP(recorder, request)
+
+	if got := recorder.Header().Get("X-Request-Id"); got != "client-request-id" {
+		t.Fatalf("response request id = %q, want incoming id", got)
+	}
+}
+
+func TestSanitizeLogValueRedactsSensitiveFields(t *testing.T) {
+	value := sanitizeLogValue(map[string]any{
+		"loginId":  "admin",
+		"password": "secret-password",
+		"nested": map[string]any{
+			"accessToken": "secret-token",
+			"safe":        "visible",
+		},
+	}).(map[string]any)
+
+	if value["loginId"] != "admin" {
+		t.Fatalf("loginId = %v, want admin", value["loginId"])
+	}
+	if value["password"] != "[REDACTED]" {
+		t.Fatalf("password was not redacted: %v", value["password"])
+	}
+	nested := value["nested"].(map[string]any)
+	if nested["accessToken"] != "[REDACTED]" {
+		t.Fatalf("nested accessToken was not redacted: %v", nested["accessToken"])
+	}
+	if nested["safe"] != "visible" {
+		t.Fatalf("nested safe = %v, want visible", nested["safe"])
+	}
+}
+
 func TestResourceOwnershipHelpers(t *testing.T) {
 	item := map[string]any{"userId": "user-1", "boothId": "booth-1"}
 	if !resourceBelongsToUser(item, "user-1") {
