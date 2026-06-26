@@ -12,9 +12,11 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,10 +62,18 @@ type server struct {
 	githubAuth    *githubOAuthClient
 }
 
+type contextKey string
+
+const (
+	requestIDContextKey   contextKey = "request_id"
+	authSessionContextKey contextKey = "auth_session"
+)
+
 func Run(ctx context.Context) error {
 	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
 		slog.Warn("load .env", "error", err)
 	}
+	configureLogging()
 
 	store, err := openPostgresStore(ctx, env("DATABASE_URL", "postgres://daema:daema@localhost:5432/daema_coin?sslmode=disable"))
 	if err != nil {
@@ -306,7 +316,221 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/admin/incidents", s.handleAdminIncidentCreate)
 	mux.HandleFunc("POST /api/admin/ranking-rules", s.handleAccepted)
 
-	return corsMiddleware(csrfMiddleware(s.authzMiddleware(mux)))
+	return requestIDMiddleware(loggingMiddleware(corsMiddleware(csrfMiddleware(s.authzMiddleware(mux)))))
+}
+
+func configureLogging() {
+	level := slog.LevelInfo
+	switch strings.ToLower(strings.TrimSpace(env("LOG_LEVEL", "info"))) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	options := &slog.HandlerOptions{
+		Level:     level,
+		AddSource: envBool("LOG_ADD_SOURCE", false),
+	}
+	if strings.EqualFold(env("LOG_FORMAT", "json"), "text") {
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, options)))
+		return
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, options)))
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	bytes       int
+	wroteHeader bool
+}
+
+func (w *loggingResponseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = status
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *loggingResponseWriter) Write(data []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.ResponseWriter.Write(data)
+	w.bytes += n
+	return n, err
+}
+
+func requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSpace(r.Header.Get("X-Request-Id"))
+		if id == "" {
+			id = newRequestID()
+		}
+		w.Header().Set("X-Request-Id", id)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDContextKey, id)))
+	})
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		recorder := &loggingResponseWriter{ResponseWriter: w, status: http.StatusOK}
+		slog.Debug("http request started", requestLogAttrs(r)...)
+
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				attrs := append(requestLogAttrs(r), "panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
+				slog.Error("http request panic", attrs...)
+				if !recorder.wroteHeader {
+					writeJSON(recorder, r, http.StatusInternalServerError, apiError{
+						Error: errorBody{Code: "INTERNAL_SERVER_ERROR", Message: "서버 내부 오류가 발생했습니다."},
+						Meta:  meta(r, nil),
+					})
+				}
+			}
+
+			attrs := append(requestLogAttrs(r),
+				"status", recorder.status,
+				"response_bytes", recorder.bytes,
+				"duration", time.Since(start).String(),
+				"duration_ms", float64(time.Since(start).Microseconds())/1000,
+			)
+			switch {
+			case recorder.status >= 500:
+				slog.Error("http request completed", attrs...)
+			case recorder.status >= 400:
+				slog.Warn("http request completed", attrs...)
+			default:
+				slog.Info("http request completed", attrs...)
+			}
+		}()
+
+		next.ServeHTTP(recorder, r)
+	})
+}
+
+func requestLogAttrs(r *http.Request) []any {
+	attrs := []any{
+		"request_id", requestID(r),
+		"method", r.Method,
+		"path", r.URL.Path,
+		"query", redactedQuery(r.URL.Query()),
+		"host", r.Host,
+		"proto", r.Proto,
+		"remote_addr", r.RemoteAddr,
+		"client_ip", clientIP(r),
+		"user_agent", r.UserAgent(),
+		"referer", r.Referer(),
+		"origin", r.Header.Get("Origin"),
+		"content_length", r.ContentLength,
+		"headers", safeHeaders(r.Header),
+	}
+	if r.Pattern != "" {
+		attrs = append(attrs, "route", r.Pattern)
+	}
+	if session, ok := authSessionFromContext(r.Context()); ok {
+		attrs = append(attrs,
+			"user_id", session.User.ID,
+			"github_login", session.User.Login,
+			"role", session.Role,
+			"roles", session.User.Roles,
+			"booth_id", session.User.BoothID,
+		)
+	}
+	return attrs
+}
+
+func clientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return realIP
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func safeHeaders(headers http.Header) map[string]any {
+	out := make(map[string]any, len(headers))
+	for key, values := range headers {
+		if sensitiveLogKey(key) {
+			out[key] = "[REDACTED]"
+			continue
+		}
+		out[key] = sanitizeLogValue(values)
+	}
+	return out
+}
+
+func redactedQuery(values url.Values) map[string]any {
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		if sensitiveLogKey(key) {
+			out[key] = "[REDACTED]"
+			continue
+		}
+		out[key] = sanitizeLogValue(value)
+	}
+	return out
+}
+
+func sanitizeLogValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			if sensitiveLogKey(key) {
+				out[key] = "[REDACTED]"
+				continue
+			}
+			out[key] = sanitizeLogValue(item)
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(v))
+		for _, item := range v {
+			out = append(out, sanitizeLogValue(item))
+		}
+		return out
+	case []string:
+		out := make([]any, 0, len(v))
+		for _, item := range v {
+			out = append(out, sanitizeLogValue(item))
+		}
+		return out
+	case string:
+		return truncateLogString(v)
+	default:
+		return v
+	}
+}
+
+func truncateLogString(value string) string {
+	const max = 512
+	if len(value) <= max {
+		return value
+	}
+	return value[:max] + "...[TRUNCATED]"
+}
+
+func sensitiveLogKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, token := range []string{"authorization", "cookie", "password", "passwd", "secret", "token", "csrf", "code", "state", "credential", "session"} {
+		if strings.Contains(key, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
@@ -362,6 +586,20 @@ func (s *server) okPage(w http.ResponseWriter, r *http.Request, data any, p *pag
 }
 
 func (s *server) fail(w http.ResponseWriter, r *http.Request, status int, code, message string, details map[string]any) {
+	attrs := []any{
+		"request_id", requestID(r),
+		"status", status,
+		"code", code,
+		"message", message,
+		"details", sanitizeLogValue(details),
+		"method", r.Method,
+		"path", r.URL.Path,
+	}
+	if status >= http.StatusInternalServerError {
+		slog.Error("api request failed", attrs...)
+	} else {
+		slog.Warn("api request failed", attrs...)
+	}
 	writeJSON(w, r, status, apiError{Error: errorBody{Code: code, Message: message, Details: details}, Meta: meta(r, nil)})
 }
 
@@ -386,14 +624,28 @@ func meta(r *http.Request, p *pagination) responseMeta {
 }
 
 func requestID(r *http.Request) string {
-	if id := r.Header.Get("X-Request-Id"); id != "" {
+	if id, ok := r.Context().Value(requestIDContextKey).(string); ok && id != "" {
 		return id
 	}
+	if id := strings.TrimSpace(r.Header.Get("X-Request-Id")); id != "" {
+		return id
+	}
+	return newRequestID()
+}
+
+func newRequestID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return strconv.FormatInt(time.Now().UnixNano(), 36)
 	}
 	return hex.EncodeToString(b[:])
+}
+
+func requestIDFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(requestIDContextKey).(string); ok {
+		return id
+	}
+	return ""
 }
 
 func env(key, defaultValue string) string {
@@ -949,6 +1201,9 @@ func (s *server) createInternalAccount(ctx context.Context, input internalAccoun
 }
 
 func (s *server) sessionFromRequest(r *http.Request) (authSession, bool) {
+	if session, ok := authSessionFromContext(r.Context()); ok {
+		return session, true
+	}
 	token := bearerToken(r)
 	if token == "" {
 		if cookie, err := r.Cookie("daema_session"); err == nil {
@@ -1000,9 +1255,11 @@ func (s *server) authzMiddleware(next http.Handler) http.Handler {
 		path := r.URL.Path
 		switch {
 		case strings.HasPrefix(path, "/api/admin/"):
-			if _, ok := s.requireRole(w, r, roleAdmin); !ok {
+			session, ok := s.requireRole(w, r, roleAdmin)
+			if !ok {
 				return
 			}
+			r = r.WithContext(contextWithAuthSession(r.Context(), session))
 		case strings.HasPrefix(path, "/api/seller/"):
 			session, ok := s.requireRole(w, r, roleBooth)
 			if !ok {
@@ -1011,13 +1268,25 @@ func (s *server) authzMiddleware(next http.Handler) http.Handler {
 			if !s.requireBoothScope(w, r, session) {
 				return
 			}
+			r = r.WithContext(contextWithAuthSession(r.Context(), session))
 		case strings.HasPrefix(path, "/api/customer/"):
-			if _, ok := s.requireRole(w, r, roleCustomer); !ok {
+			session, ok := s.requireRole(w, r, roleCustomer)
+			if !ok {
 				return
 			}
+			r = r.WithContext(contextWithAuthSession(r.Context(), session))
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func contextWithAuthSession(ctx context.Context, session authSession) context.Context {
+	return context.WithValue(ctx, authSessionContextKey, session)
+}
+
+func authSessionFromContext(ctx context.Context) (authSession, bool) {
+	session, ok := ctx.Value(authSessionContextKey).(authSession)
+	return session, ok
 }
 
 func (s *server) requireBoothScope(w http.ResponseWriter, r *http.Request, session authSession) bool {
@@ -1263,6 +1532,15 @@ func (s *server) listResources(w http.ResponseWriter, r *http.Request, domain st
 	if len(items) > limit {
 		items = items[:limit]
 	}
+	slog.Debug("resource list loaded",
+		"request_id", requestID(r),
+		"domain", domain,
+		"limit", limit,
+		"store_limit", storeLimit,
+		"query", truncateLogString(r.URL.Query().Get("q")),
+		"filters", resourceFiltersForLog(filters),
+		"result_count", len(items),
+	)
 	return items, limit, true
 }
 
@@ -1288,6 +1566,13 @@ func (s *server) createResource(w http.ResponseWriter, r *http.Request, domain, 
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "데이터를 저장하지 못했습니다.", map[string]any{"domain": domain, "cause": err.Error()})
 		return nil, false
 	}
+	slog.Debug("resource created",
+		"request_id", requestID(r),
+		"domain", domain,
+		"id", id,
+		"payload_keys", sortedMapKeys(body),
+		"extras", sanitizeLogValue(extras),
+	)
 	return item, true
 }
 
@@ -1308,6 +1593,13 @@ func (s *server) updateResource(w http.ResponseWriter, r *http.Request, domain, 
 		s.fail(w, r, http.StatusNotFound, "RECORD_NOT_FOUND", "대상 데이터를 찾을 수 없습니다.", map[string]any{"domain": domain, "id": id})
 		return nil, false
 	}
+	slog.Debug("resource updated",
+		"request_id", requestID(r),
+		"domain", domain,
+		"id", id,
+		"payload_keys", sortedMapKeys(body),
+		"extras", sanitizeLogValue(extras),
+	)
 	return item, true
 }
 
@@ -1324,6 +1616,13 @@ func (s *server) putResource(w http.ResponseWriter, r *http.Request, domain, id 
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "데이터를 저장하지 못했습니다.", map[string]any{"domain": domain, "id": id, "cause": err.Error()})
 		return nil, false
 	}
+	slog.Debug("resource put",
+		"request_id", requestID(r),
+		"domain", domain,
+		"id", id,
+		"payload_keys", sortedMapKeys(body),
+		"extras", sanitizeLogValue(extras),
+	)
 	return item, true
 }
 
@@ -1332,6 +1631,7 @@ func (s *server) deleteResource(w http.ResponseWriter, r *http.Request, domain, 
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "데이터를 삭제하지 못했습니다.", map[string]any{"domain": domain, "id": id, "cause": err.Error()})
 		return false
 	}
+	slog.Debug("resource deleted", "request_id", requestID(r), "domain", domain, "id", id)
 	return true
 }
 
@@ -1373,9 +1673,48 @@ func (s *server) requestPayload(w http.ResponseWriter, r *http.Request) (map[str
 		return map[string]any{}, true
 	}
 	if data, ok := normalizeJSON(payload).(map[string]any); ok {
+		slog.Debug("http request payload decoded",
+			"request_id", requestID(r),
+			"method", r.Method,
+			"path", r.URL.Path,
+			"payload_keys", sortedMapKeys(data),
+			"payload", sanitizeLogValue(data),
+		)
 		return data, true
 	}
-	return map[string]any{"payload": normalizeJSON(payload)}, true
+	data := map[string]any{"payload": normalizeJSON(payload)}
+	slog.Debug("http request payload decoded",
+		"request_id", requestID(r),
+		"method", r.Method,
+		"path", r.URL.Path,
+		"payload_keys", sortedMapKeys(data),
+		"payload", sanitizeLogValue(data),
+	)
+	return data, true
+}
+
+func sortedMapKeys(data map[string]any) []string {
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func resourceFiltersForLog(filters []resourceFilter) []map[string]string {
+	out := make([]map[string]string, 0, len(filters))
+	for _, filter := range filters {
+		value := truncateLogString(filter.Value)
+		if sensitiveLogKey(filter.Field) {
+			value = "[REDACTED]"
+		}
+		out = append(out, map[string]string{
+			"field": filter.Field,
+			"value": value,
+		})
+	}
+	return out
 }
 
 func normalizeJSON(value any) any {
@@ -4465,12 +4804,32 @@ func (c *githubOAuthClient) Exchange(ctx context.Context, code string) (githubTo
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
+	start := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
+		slog.Error("github token exchange failed",
+			"request_id", requestIDFromContext(ctx),
+			"method", req.Method,
+			"url", c.tokenURL,
+			"duration", time.Since(start).String(),
+			"error", err,
+		)
 		return githubTokenResponse{}, err
 	}
 	defer resp.Body.Close()
+	slog.Debug("github token exchange completed",
+		"request_id", requestIDFromContext(ctx),
+		"method", req.Method,
+		"url", c.tokenURL,
+		"status", resp.StatusCode,
+		"duration", time.Since(start).String(),
+	)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Warn("github token exchange returned non-success status",
+			"request_id", requestIDFromContext(ctx),
+			"status", resp.StatusCode,
+			"duration", time.Since(start).String(),
+		)
 		return githubTokenResponse{}, fmt.Errorf("GitHub token endpoint returned status %d", resp.StatusCode)
 	}
 
@@ -4639,13 +4998,36 @@ func (c *githubOAuthClient) githubGet(ctx context.Context, accessToken, path str
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("X-GitHub-Api-Version", env("GITHUB_API_VERSION", "2022-11-28"))
 
+	start := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
+		slog.Error("github api request failed",
+			"request_id", requestIDFromContext(ctx),
+			"method", req.Method,
+			"path", path,
+			"duration", time.Since(start).String(),
+			"error", err,
+		)
 		return err
 	}
 	defer resp.Body.Close()
+	slog.Debug("github api request completed",
+		"request_id", requestIDFromContext(ctx),
+		"method", req.Method,
+		"path", path,
+		"status", resp.StatusCode,
+		"duration", time.Since(start).String(),
+	)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		slog.Warn("github api request returned non-success status",
+			"request_id", requestIDFromContext(ctx),
+			"method", req.Method,
+			"path", path,
+			"status", resp.StatusCode,
+			"duration", time.Since(start).String(),
+			"body", truncateLogString(strings.TrimSpace(string(body))),
+		)
 		return githubAPIError{Path: path, Status: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 	return json.NewDecoder(resp.Body).Decode(target)
@@ -4764,15 +5146,51 @@ func (c *footballClient) get(ctx context.Context, path string, values url.Values
 		return err
 	}
 	req.Header.Set("x-apisports-key", c.apiKey)
+	start := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
+		slog.Error("api-football request failed",
+			"request_id", requestIDFromContext(ctx),
+			"method", req.Method,
+			"path", path,
+			"query", redactedQuery(values),
+			"duration", time.Since(start).String(),
+			"error", err,
+		)
 		return err
 	}
 	defer resp.Body.Close()
+	slog.Debug("api-football request completed",
+		"request_id", requestIDFromContext(ctx),
+		"method", req.Method,
+		"path", path,
+		"query", redactedQuery(values),
+		"status", resp.StatusCode,
+		"duration", time.Since(start).String(),
+	)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		slog.Warn("api-football request returned non-success status",
+			"request_id", requestIDFromContext(ctx),
+			"method", req.Method,
+			"path", path,
+			"query", redactedQuery(values),
+			"status", resp.StatusCode,
+			"duration", time.Since(start).String(),
+			"body", truncateLogString(strings.TrimSpace(string(body))),
+		)
 		return fmt.Errorf("api-football status %d", resp.StatusCode)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		slog.Warn("api-football response decode failed",
+			"request_id", requestIDFromContext(ctx),
+			"method", req.Method,
+			"path", path,
+			"query", redactedQuery(values),
+			"status", resp.StatusCode,
+			"duration", time.Since(start).String(),
+			"error", err,
+		)
 		return err
 	}
 	return nil
