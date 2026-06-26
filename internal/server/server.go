@@ -3146,11 +3146,13 @@ func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request)
 	counts := map[string]int{"home": 0, "draw": 0, "away": 0}
 	myPrediction := ""
 	myStakeAmount := 0
+	totalStakeAmount := 0
 	userID := s.currentUserID(r)
 	for _, item := range items {
 		pick := stringValue(item["pick"])
 		if _, ok := counts[pick]; ok {
 			counts[pick]++
+			totalStakeAmount += predictionStakeAmount(item)
 		}
 		if userID != "" && stringValue(item["userId"]) == userID {
 			myPrediction = pick
@@ -3165,15 +3167,16 @@ func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request)
 		return int(math.Round(float64(count) / float64(total) * 100))
 	}
 	data := map[string]any{
-		"matchId":       matchID,
-		"homePercent":   percent(counts["home"]),
-		"drawPercent":   percent(counts["draw"]),
-		"awayPercent":   percent(counts["away"]),
-		"totalCount":    total,
-		"canPredict":    myPrediction == "" && (!matchStatusKnown || match.Status == "scheduled"),
-		"canCancel":     myPrediction != "" && (!matchStatusKnown || match.Status == "scheduled"),
-		"myPrediction":  nil,
-		"myStakeAmount": nil,
+		"matchId":          matchID,
+		"homePercent":      percent(counts["home"]),
+		"drawPercent":      percent(counts["draw"]),
+		"awayPercent":      percent(counts["away"]),
+		"totalCount":       total,
+		"totalStakeAmount": totalStakeAmount,
+		"canPredict":       myPrediction == "" && (!matchStatusKnown || match.Status == "scheduled"),
+		"canCancel":        myPrediction != "" && (!matchStatusKnown || match.Status == "scheduled"),
+		"myPrediction":     nil,
+		"myStakeAmount":    nil,
 	}
 	if matchStatusKnown {
 		data["matchStatus"] = match.Status
