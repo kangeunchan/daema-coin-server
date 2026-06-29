@@ -178,6 +178,48 @@ func TestPostgresStoreLedgerIdempotencyAndConcurrentDebit(t *testing.T) {
 	}
 }
 
+func TestLegacySignupBonusMigrationPreservesIdempotency(t *testing.T) {
+	store, ctx := openIntegrationStore(t)
+	suffix := randomToken()[:12]
+	user := createIntegrationCustomer(t, store, ctx, "test-legacy-signup-"+suffix)
+	id := ledgerID("signup-bonus", "POINT", user.ID)
+
+	created, err := store.createLedgerAndAdjustWallet(ctx, user, id, "signup-bonus", "income", "POINT", initialSignupPoints, map[string]any{
+		"referenceType": "signup-bonus",
+		"description":   "회원가입 대마포인트 지급",
+	})
+	if err != nil || !created {
+		t.Fatalf("create legacy signup bonus: created=%v err=%v", created, err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+UPDATE ledger_transactions
+SET idempotency_key = $2
+WHERE id = $1`, id, "legacy-resources:ledger_transactions:"+id); err != nil {
+		t.Fatalf("mark signup bonus as migrated legacy ledger: %v", err)
+	}
+
+	migration, err := migrationFiles.ReadFile("migrations/0006_normalize_legacy_signup_bonus_ledgers.sql")
+	if err != nil {
+		t.Fatalf("read signup bonus compatibility migration: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, string(migration)); err != nil {
+		t.Fatalf("apply signup bonus compatibility migration: %v", err)
+	}
+
+	created, err = store.createLedgerAndAdjustWallet(ctx, user, id, "signup-bonus", "income", "POINT", initialSignupPoints, map[string]any{
+		"description": "회원가입 대마포인트 지급",
+	})
+	if err != nil {
+		t.Fatalf("replay migrated signup bonus: %v", err)
+	}
+	if created {
+		t.Fatal("replayed signup bonus created a duplicate ledger")
+	}
+	if balance, err := store.walletBalance(ctx, user.ID, "POINT"); err != nil || balance != initialSignupPoints {
+		t.Fatalf("signup balance after replay = %d, err=%v; want %d", balance, err, initialSignupPoints)
+	}
+}
+
 func TestPostgresStorePredictionStakeCancelAndInsufficientBalanceAreAtomic(t *testing.T) {
 	store, ctx := openIntegrationStore(t)
 	suffix := randomToken()[:12]
