@@ -171,6 +171,32 @@ func TestCSRFMiddlewareBlocksUntrustedMutationOrigins(t *testing.T) {
 	}
 }
 
+func TestCSRFMiddlewareBlocksMissingMutationOriginByDefault(t *testing.T) {
+	handler := csrfMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	denied := httptest.NewRecorder()
+	handler.ServeHTTP(denied, httptest.NewRequest(http.MethodPost, "/api/customer/orders", nil))
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("missing origin mutation status = %d, want %d", denied.Code, http.StatusForbidden)
+	}
+
+	bearer := httptest.NewRecorder()
+	bearerReq := httptest.NewRequest(http.MethodPost, "/api/customer/orders", nil)
+	bearerReq.Header.Set("Authorization", "Bearer token")
+	handler.ServeHTTP(bearer, bearerReq)
+	if bearer.Code != http.StatusOK {
+		t.Fatalf("bearer mutation without origin status = %d, want %d", bearer.Code, http.StatusOK)
+	}
+
+	webhook := httptest.NewRecorder()
+	handler.ServeHTTP(webhook, httptest.NewRequest(http.MethodPost, "/api/github/webhooks", nil))
+	if webhook.Code != http.StatusOK {
+		t.Fatalf("github webhook without origin status = %d, want %d", webhook.Code, http.StatusOK)
+	}
+}
+
 func TestCustomerAPIsRequireCustomerSession(t *testing.T) {
 	s := &server{}
 	handler := s.authzMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +209,37 @@ func TestCustomerAPIsRequireCustomerSession(t *testing.T) {
 
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("customer API without session status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestFileUploadRequiresPrivilegedSession(t *testing.T) {
+	s := &server{}
+	handler := s.authzMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	anonymous := httptest.NewRecorder()
+	handler.ServeHTTP(anonymous, httptest.NewRequest(http.MethodPost, "/api/files/uploads", nil))
+	if anonymous.Code != http.StatusUnauthorized {
+		t.Fatalf("file upload without session status = %d, want %d", anonymous.Code, http.StatusUnauthorized)
+	}
+
+	customer := httptest.NewRecorder()
+	customerReq := httptest.NewRequest(http.MethodPost, "/api/files/uploads", nil)
+	customerReq = customerReq.WithContext(contextWithAuthSession(customerReq.Context(), authSession{User: authUser{ID: "customer-1", Roles: []string{roleCustomer}}}))
+	handler.ServeHTTP(customer, customerReq)
+	if customer.Code != http.StatusForbidden {
+		t.Fatalf("file upload with customer session status = %d, want %d", customer.Code, http.StatusForbidden)
+	}
+
+	for _, role := range []string{roleAdmin, roleBooth} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/files/uploads", nil)
+		request = request.WithContext(contextWithAuthSession(request.Context(), authSession{User: authUser{ID: role + "-1", Roles: []string{role}}}))
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNoContent {
+			t.Fatalf("file upload with %s session status = %d, want %d", role, recorder.Code, http.StatusNoContent)
+		}
 	}
 }
 
@@ -210,6 +267,37 @@ func TestRequestPayloadRejectsOversizedBodies(t *testing.T) {
 	}
 	if recorder.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized body status = %d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestDecodeStrictJSONRejectsUnknownFields(t *testing.T) {
+	s := &server{}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/accounts", strings.NewReader(`{"loginId":"admin","password":"long-enough-password","unexpected":true}`))
+
+	var body adminAccountCreateRequest
+	if s.decodeStrictJSON(recorder, request, &body) {
+		t.Fatal("decodeStrictJSON accepted unknown field")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("unknown field status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
+func TestQueryIntUsesPositiveBoundedLimit(t *testing.T) {
+	tooLarge := httptest.NewRequest(http.MethodGet, "/api/customer/orders?limit=999999", nil)
+	if got := queryInt(tooLarge, "limit", 20); got != 1000 {
+		t.Fatalf("large limit = %d, want 1000", got)
+	}
+
+	negative := httptest.NewRequest(http.MethodGet, "/api/customer/orders?limit=-1", nil)
+	if got := queryInt(negative, "limit", 20); got != 20 {
+		t.Fatalf("negative limit = %d, want default 20", got)
+	}
+
+	missing := httptest.NewRequest(http.MethodGet, "/api/customer/orders", nil)
+	if got := queryInt(missing, "limit", 2000); got != 1000 {
+		t.Fatalf("large default limit = %d, want bounded 1000", got)
 	}
 }
 
@@ -255,6 +343,24 @@ func TestRequestIDMiddlewarePreservesIncomingRequestID(t *testing.T) {
 	}
 }
 
+func TestRequestIDMiddlewareSanitizesIncomingRequestID(t *testing.T) {
+	handler := requestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := requestID(r); got != "badid" {
+			t.Fatalf("request id = %q, want sanitized id", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.Header.Set("X-Request-Id", "bad\nid")
+	handler.ServeHTTP(recorder, request)
+
+	if got := recorder.Header().Get("X-Request-Id"); got != "badid" {
+		t.Fatalf("response request id = %q, want sanitized id", got)
+	}
+}
+
 func TestSanitizeLogValueRedactsSensitiveFields(t *testing.T) {
 	value := sanitizeLogValue(map[string]any{
 		"loginId":  "admin",
@@ -293,6 +399,71 @@ func TestResourceOwnershipHelpers(t *testing.T) {
 	}
 	if resourceBelongsToBooth(item, "booth-2") {
 		t.Fatal("resourceBelongsToBooth accepted another booth")
+	}
+}
+
+func TestRouteRoleWrappersEnforcePolicy(t *testing.T) {
+	s := &server{}
+	called := false
+	handler := s.requireRouteRole(roleCustomer, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if session, ok := authSessionFromContext(r.Context()); !ok || session.User.ID != "customer-1" {
+			t.Fatalf("route context session = %#v, %v; want customer session", session, ok)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/customer/me", nil)
+	request = request.WithContext(contextWithAuthSession(request.Context(), authSession{
+		User: authUser{ID: "customer-1", Roles: []string{roleCustomer}},
+		Role: roleCustomer,
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if !called {
+		t.Fatal("customer route handler was not called")
+	}
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("customer route status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+}
+
+func TestRouteRoleWrappersRejectWrongRole(t *testing.T) {
+	s := &server{}
+	handler := s.requireRouteRole(roleAdmin, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("admin route handler should not be called for customer role")
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/dashboard", nil)
+	request = request.WithContext(contextWithAuthSession(request.Context(), authSession{
+		User: authUser{ID: "customer-1", Roles: []string{roleCustomer}},
+		Role: roleCustomer,
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("wrong role status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestSellerRouteWrapperEnforcesBoothScope(t *testing.T) {
+	s := &server{}
+	handler := s.requireSellerRoute(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("seller route handler should not be called for another booth")
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/seller/booths/booth-2/orders", nil)
+	request = request.WithContext(contextWithAuthSession(request.Context(), authSession{
+		User: authUser{ID: "seller-1", BoothID: "booth-1", Roles: []string{roleBooth}},
+		Role: roleBooth,
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("booth scope status = %d, want %d", recorder.Code, http.StatusForbidden)
 	}
 }
 

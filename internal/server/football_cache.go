@@ -42,8 +42,14 @@ func openRedisFootballCache(ctx context.Context) (*redisFootballCache, error) {
 	if err != nil {
 		return nil, err
 	}
+	options.DialTimeout = envDuration("REDIS_DIAL_TIMEOUT", 5*time.Second)
+	options.ReadTimeout = envDuration("REDIS_READ_TIMEOUT", 3*time.Second)
+	options.WriteTimeout = envDuration("REDIS_WRITE_TIMEOUT", 3*time.Second)
 	client := redis.NewClient(options)
-	if err := client.Ping(ctx).Err(); err != nil {
+	pingCtx, cancel := context.WithTimeout(ctx, envDuration("REDIS_PING_TIMEOUT", 5*time.Second))
+	defer cancel()
+	if err := client.Ping(pingCtx).Err(); err != nil {
+		_ = client.Close()
 		return nil, err
 	}
 	return &redisFootballCache{
