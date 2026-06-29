@@ -80,10 +80,19 @@ REDIS_URL=redis://localhost:6379/0
 | `CORS_ALLOW_ORIGINS` | N | `http://localhost:5173,http://localhost:5174,http://localhost:5175` | 쿠키 인증 요청을 허용할 프론트 origin 목록 |
 | `PUBLIC_BASE_URL` | N | `http://localhost:5173` | 고객 프론트 기본 URL |
 | `DATABASE_URL` | Y | `postgres://daema:daema@localhost:5432/daema_coin?sslmode=disable` | PostgreSQL DSN |
+| `DATABASE_MAX_OPEN_CONNS` | N | `10` | PostgreSQL 최대 open connection 수 |
+| `DATABASE_MAX_IDLE_CONNS` | N | `5` | PostgreSQL 최대 idle connection 수 |
+| `DATABASE_CONN_MAX_LIFETIME` | N | `30m` | PostgreSQL connection 최대 수명 |
+| `DATABASE_CONN_MAX_IDLE_TIME` | N | `5m` | PostgreSQL idle connection 최대 유지 시간 |
 | `REDIS_URL` | Y | `redis://localhost:6379/0` | API-FOOTBALL 캐시 Redis URL |
+| `REDIS_DIAL_TIMEOUT` | N | `5s` | Redis 연결 timeout |
+| `REDIS_READ_TIMEOUT` | N | `3s` | Redis read timeout |
+| `REDIS_WRITE_TIMEOUT` | N | `3s` | Redis write timeout |
+| `REDIS_PING_TIMEOUT` | N | `5s` | 서버 시작 시 Redis ping timeout |
 | `APP_TIMEZONE` | N | `Asia/Seoul` | 날짜 그룹/오늘 판단 기준 timezone |
 | `SESSION_COOKIE_DOMAIN` | N | empty | 세션 쿠키 domain override |
 | `HTTP_MAX_JSON_BODY_BYTES` | N | `1048576` | JSON API 요청 본문 최대 크기 |
+| `CSRF_ALLOW_MISSING_ORIGIN` | N | `false` | 쿠키 기반 변경 요청에서 Origin/Referer 누락을 허용할지 여부 |
 | `GITHUB_OAUTH_CLIENT_ID` | Y | GitHub OAuth App client id | GitHub OAuth client id |
 | `GITHUB_OAUTH_CLIENT_SECRET` | Y | GitHub OAuth App secret | GitHub OAuth client secret |
 | `GITHUB_OAUTH_REDIRECT_URI` | Y | `http://localhost:8080/api/auth/github/callback` | GitHub callback URL |
@@ -216,7 +225,7 @@ http://localhost:8080/api/auth/github/callback
 | `GET` | `/api/auth/me` | 현재 세션 조회 |
 | `PUT` | `/api/auth/me/student-profile` | 고객 학생 프로필 저장 |
 | `POST` | `/api/auth/logout` | 로그아웃 |
-| `POST` | `/api/files/uploads` | 파일 업로드 메타 저장 |
+| `POST` | `/api/files/uploads` | 파일 업로드 메타 저장. 관리자 또는 부스 계정 필요 |
 | `GET` | `/api/search/suggestions` | 검색 제안 목록 |
 | `GET` | `/api/search` | 통합 검색 |
 
