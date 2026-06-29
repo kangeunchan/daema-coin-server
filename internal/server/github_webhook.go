@@ -129,6 +129,10 @@ func (s *server) storeGitHubInstallationEvent(ctx context.Context, event, delive
 }
 
 func (s *server) storeGitHubPushEvent(ctx context.Context, deliveryID string, body []byte) (int, error) {
+	return s.storeGitHubPushEventAt(ctx, deliveryID, body, time.Now().UTC())
+}
+
+func (s *server) storeGitHubPushEventAt(ctx context.Context, deliveryID string, body []byte, receivedAt time.Time) (int, error) {
 	payload := githubPushWebhookPayload{}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return 0, err
@@ -136,32 +140,31 @@ func (s *server) storeGitHubPushEvent(ctx context.Context, deliveryID string, bo
 	if payload.Repository.FullName == "" {
 		return 0, errors.New("repository full_name is empty")
 	}
+	receivedAt = receivedAt.UTC()
 	count := 0
 	for _, commit := range payload.Commits {
 		if commit.ID == "" {
 			continue
 		}
-		occurredAt := commit.Timestamp
-		if occurredAt.IsZero() {
-			occurredAt = time.Now().UTC()
-		}
+		occurredAt, commitTimestamp := githubWebhookCommitTimes(receivedAt, commit.Timestamp)
 		authorLogin := firstNonEmpty(commit.Author.Username, commit.Committer.Username, payload.Sender.Login, payload.Pusher.Name)
-		rewardPoints, rewardUser, err := s.githubCommitReward(ctx, authorLogin, occurredAt)
+		rewardPoints, rewardUser, err := s.githubCommitReward(ctx, authorLogin, receivedAt)
 		if err != nil {
 			return count, err
 		}
 		title := strings.TrimSpace(strings.Split(commit.Message, "\n")[0])
 		item := githubCommitItem{
-			SHA:          commit.ID,
-			Repository:   payload.Repository.FullName,
-			Message:      commit.Message,
-			Title:        title,
-			AuthorName:   firstNonEmpty(commit.Author.Name, commit.Committer.Name),
-			AuthorEmail:  firstNonEmpty(commit.Author.Email, commit.Committer.Email),
-			AuthorLogin:  authorLogin,
-			OccurredAt:   occurredAt,
-			HTMLURL:      commit.URL,
-			RewardPoints: rewardPoints,
+			SHA:             commit.ID,
+			Repository:      payload.Repository.FullName,
+			Message:         commit.Message,
+			Title:           title,
+			AuthorName:      firstNonEmpty(commit.Author.Name, commit.Committer.Name),
+			AuthorEmail:     firstNonEmpty(commit.Author.Email, commit.Committer.Email),
+			AuthorLogin:     authorLogin,
+			OccurredAt:      occurredAt,
+			CommitTimestamp: commitTimestamp,
+			HTMLURL:         commit.URL,
+			RewardPoints:    rewardPoints,
 		}
 		data, err := mapFromStruct(item)
 		if err != nil {
@@ -195,7 +198,7 @@ func (s *server) storeGitHubPushEvent(ctx context.Context, deliveryID string, bo
 				"commitSha":   commit.ID,
 				"repository":  payload.Repository.FullName,
 				"htmlUrl":     commit.URL,
-				"occurredAt":  occurredAt.UTC().Format(time.RFC3339),
+				"occurredAt":  receivedAt.Format(time.RFC3339),
 			})
 			if err != nil {
 				return count, err
@@ -204,4 +207,13 @@ func (s *server) storeGitHubPushEvent(ctx context.Context, deliveryID string, bo
 		count++
 	}
 	return count, nil
+}
+
+func githubWebhookCommitTimes(receivedAt, payloadTimestamp time.Time) (time.Time, *time.Time) {
+	receivedAt = receivedAt.UTC()
+	if payloadTimestamp.IsZero() {
+		return receivedAt, nil
+	}
+	timestamp := payloadTimestamp.UTC()
+	return receivedAt, &timestamp
 }

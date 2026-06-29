@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -217,6 +219,118 @@ WHERE id = $1`, id, "legacy-resources:ledger_transactions:"+id); err != nil {
 	}
 	if balance, err := store.walletBalance(ctx, user.ID, "POINT"); err != nil || balance != initialSignupPoints {
 		t.Fatalf("signup balance after replay = %d, err=%v; want %d", balance, err, initialSignupPoints)
+	}
+}
+
+func TestGitHubPushRewardsUseServerReceivedDate(t *testing.T) {
+	store, ctx := openIntegrationStore(t)
+	suffix := randomToken()[:12]
+	user := authUser{
+		ID:       "test-github-reward-" + suffix,
+		GitHubID: time.Now().UnixNano(),
+		Login:    "test-github-login-" + suffix,
+		Name:     "Test GitHub Reward",
+		Provider: "github",
+		Roles:    []string{roleCustomer},
+	}
+	if _, err := store.saveCustomerProfile(ctx, user, map[string]any{"name": user.Name}); err != nil {
+		t.Fatalf("save GitHub reward customer: %v", err)
+	}
+
+	commits := make([]map[string]any, 0, commitRewardLimit+1)
+	for i := 0; i < commitRewardLimit+1; i++ {
+		commits = append(commits, map[string]any{
+			"id":        fmt.Sprintf("test-sha-%s-%02d", suffix, i),
+			"message":   "test commit",
+			"timestamp": time.Date(2000, time.January, i+1, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
+			"url":       "https://github.com/test/repository/commit/test",
+			"distinct":  true,
+			"author":    map[string]any{"username": user.Login},
+		})
+	}
+	payload, err := json.Marshal(map[string]any{
+		"repository": map[string]any{"id": 1, "full_name": "test/repository-" + suffix},
+		"sender":     map[string]any{"login": user.Login},
+		"commits":    commits,
+	})
+	if err != nil {
+		t.Fatalf("marshal GitHub push payload: %v", err)
+	}
+
+	receivedAt := time.Date(2026, time.June, 29, 4, 0, 0, 0, time.UTC)
+	srv := &server{store: store}
+	stored, err := srv.storeGitHubPushEventAt(ctx, "test-delivery-"+suffix, payload, receivedAt)
+	if err != nil {
+		t.Fatalf("store GitHub push event: %v", err)
+	}
+	if stored != commitRewardLimit+1 {
+		t.Fatalf("stored commits = %d, want %d", stored, commitRewardLimit+1)
+	}
+	if balance, err := store.walletBalance(ctx, user.ID, commitRewardCurrency); err != nil || balance != commitRewardLimit*commitRewardPoints {
+		t.Fatalf("GitHub reward balance = %d, err=%v; want %d", balance, err, commitRewardLimit*commitRewardPoints)
+	}
+
+	items, err := store.listFiltered(ctx, resourceGitHubCommits, []resourceFilter{{Field: "authorLogin", Value: user.Login}}, commitRewardLimit+1)
+	if err != nil {
+		t.Fatalf("list stored GitHub commits: %v", err)
+	}
+	for _, storedCommit := range items {
+		commit := githubCommitItem{}
+		if err := decodeMap(storedCommit, &commit); err != nil {
+			t.Fatalf("decode stored GitHub commit: %v", err)
+		}
+		if !commit.OccurredAt.Equal(receivedAt) {
+			t.Fatalf("stored occurredAt = %s, want server receivedAt %s", commit.OccurredAt, receivedAt)
+		}
+		if commit.CommitTimestamp == nil || !commit.CommitTimestamp.Before(receivedAt) {
+			t.Fatalf("commit timestamp was not preserved separately: %#v", commit.CommitTimestamp)
+		}
+	}
+}
+
+func TestLegacyGitHubCommitMigrationUsesDatabaseCreatedAt(t *testing.T) {
+	store, ctx := openIntegrationStore(t)
+	suffix := randomToken()[:12]
+	id := "test-legacy-github-commit-" + suffix
+	commitTimestamp := time.Date(2000, time.January, 1, 12, 0, 0, 0, time.UTC)
+	createdAt := time.Date(2026, time.June, 29, 4, 0, 0, 0, time.UTC)
+	payload, err := json.Marshal(map[string]any{
+		"id":             id,
+		"sha":            "test-sha-" + suffix,
+		"authorLogin":    "test-login-" + suffix,
+		"occurredAt":     commitTimestamp.Format(time.RFC3339),
+		"rewardedPoints": commitRewardPoints,
+	})
+	if err != nil {
+		t.Fatalf("marshal legacy GitHub commit: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+INSERT INTO github_commit_events(id, payload, created_at, updated_at)
+VALUES($1, $2, $3, $3)`, id, string(payload), createdAt); err != nil {
+		t.Fatalf("insert legacy GitHub commit: %v", err)
+	}
+
+	migration, err := migrationFiles.ReadFile("migrations/0007_use_server_time_for_github_commits.sql")
+	if err != nil {
+		t.Fatalf("read GitHub server time migration: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, string(migration)); err != nil {
+		t.Fatalf("apply GitHub server time migration: %v", err)
+	}
+
+	item, found, err := store.get(ctx, resourceGitHubCommits, id)
+	if err != nil || !found {
+		t.Fatalf("load migrated GitHub commit: found=%v err=%v", found, err)
+	}
+	commit := githubCommitItem{}
+	if err := decodeMap(item, &commit); err != nil {
+		t.Fatalf("decode migrated GitHub commit: %v", err)
+	}
+	if !commit.OccurredAt.Equal(createdAt) {
+		t.Fatalf("migrated occurredAt = %s, want database createdAt %s", commit.OccurredAt, createdAt)
+	}
+	if commit.CommitTimestamp == nil || !commit.CommitTimestamp.Equal(commitTimestamp) {
+		t.Fatalf("migrated commitTimestamp = %v, want %s", commit.CommitTimestamp, commitTimestamp)
 	}
 }
 

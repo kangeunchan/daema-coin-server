@@ -166,16 +166,17 @@ func (s *server) githubAppInstalledForUser(ctx context.Context, user authUser) (
 }
 
 type githubCommitItem struct {
-	SHA          string    `json:"sha"`
-	Repository   string    `json:"repository"`
-	Message      string    `json:"message"`
-	Title        string    `json:"title"`
-	AuthorName   string    `json:"authorName,omitempty"`
-	AuthorEmail  string    `json:"authorEmail,omitempty"`
-	AuthorLogin  string    `json:"authorLogin,omitempty"`
-	OccurredAt   time.Time `json:"occurredAt"`
-	HTMLURL      string    `json:"htmlUrl"`
-	RewardPoints int       `json:"rewardedPoints"`
+	SHA             string     `json:"sha"`
+	Repository      string     `json:"repository"`
+	Message         string     `json:"message"`
+	Title           string     `json:"title"`
+	AuthorName      string     `json:"authorName,omitempty"`
+	AuthorEmail     string     `json:"authorEmail,omitempty"`
+	AuthorLogin     string     `json:"authorLogin,omitempty"`
+	OccurredAt      time.Time  `json:"occurredAt"`
+	CommitTimestamp *time.Time `json:"commitTimestamp,omitempty"`
+	HTMLURL         string     `json:"htmlUrl"`
+	RewardPoints    int        `json:"rewardedPoints"`
 }
 
 func (s *server) requireGitHubSession(w http.ResponseWriter, r *http.Request) (authSession, bool) {
