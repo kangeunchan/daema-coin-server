@@ -207,6 +207,8 @@ http://localhost:8080/api/auth/github/callback
 | `GITHUB_OAUTH_FAILED` | 400 | OAuth 처리 실패 |
 | `INVALID_GITHUB_WEBHOOK_SIGNATURE` | 401 | GitHub webhook 서명 검증 실패 |
 | `GITHUB_WEBHOOK_STORE_FAILED` | 500 | GitHub webhook 저장 실패 |
+| `INVALID_STUDENT_NUMBER` | 400 | 학번 누락 |
+| `STUDENT_NUMBER_ALREADY_REGISTERED` | 409 | 다른 고객이 이미 등록한 학번 |
 | `API_FOOTBALL_NOT_CONFIGURED` | 503 | API-FOOTBALL key 누락 |
 | `API_FOOTBALL_UNAVAILABLE` | 502 | API-FOOTBALL upstream 실패 |
 | `DATABASE_READ_FAILED` | 500 | DB 읽기 실패 |
@@ -230,6 +232,8 @@ http://localhost:8080/api/auth/github/callback
 | `GET` | `/api/search` | 통합 검색 |
 
 신규 사용자가 학생 프로필을 처음 저장하면 대마코인(`DMC`) 40,000개와 대마포인트(`POINT`) 10,000개를 지급하고 `wallet_accounts`, `ledger_transactions`에 기록한다. 보상 원장과 잔액 갱신은 같은 DB 트랜잭션에서 처리한다.
+
+학생 프로필의 학번은 앞뒤 공백을 제거한 값으로 저장하며 전체 고객에서 고유해야 한다. 동일 고객의 재저장은 허용하지만 다른 고객이 등록한 학번은 `409 STUDENT_NUMBER_ALREADY_REGISTERED`로 거부한다.
 
 ## 6. 고객 API
 

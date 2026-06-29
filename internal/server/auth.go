@@ -180,6 +180,14 @@ func (s *server) handleStudentProfile(w http.ResponseWriter, r *http.Request) {
 	profile["githubId"] = session.User.GitHubID
 	item, err := s.store.saveCustomerProfile(r.Context(), session.User, profile)
 	if err != nil {
+		if errors.Is(err, errStudentNoRequired) || errors.Is(err, errInvalidStudentNo) {
+			s.fail(w, r, http.StatusBadRequest, "INVALID_STUDENT_NUMBER", "학번은 숫자 4~12자리로 입력해 주세요.", nil)
+			return
+		}
+		if errors.Is(err, errDuplicateStudentNo) {
+			s.fail(w, r, http.StatusConflict, "STUDENT_NUMBER_ALREADY_REGISTERED", "이미 등록된 학번입니다.", nil)
+			return
+		}
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "학생 프로필을 저장하지 못했습니다.", map[string]any{"cause": err.Error()})
 		return
 	}
