@@ -381,6 +381,7 @@ func (s *server) handleAdminWorldcupTeams(w http.ResponseWriter, r *http.Request
 	out := []worldcupTeam{}
 	for _, team := range seen {
 		team.Score = nil
+		team.Winner = nil
 		out = append(out, team)
 	}
 	s.ok(w, r, out)

@@ -14,6 +14,7 @@ type worldcupTeam struct {
 	Name        string `json:"name"`
 	Logo        string `json:"logo,omitempty"`
 	Score       *int   `json:"score,omitempty"`
+	Winner      *bool  `json:"winner,omitempty"`
 }
 
 type worldcupMatch struct {

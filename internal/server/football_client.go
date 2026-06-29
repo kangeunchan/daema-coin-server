@@ -224,8 +224,8 @@ func (f apiFootballFixture) toWorldcupMatch() worldcupMatch {
 	}
 	return worldcupMatch{
 		ID: id, MatchDayID: startLocal.Format("2006-01-02"),
-		Home:   worldcupTeam{ID: strconv.Itoa(f.Teams.Home.ID), CountryCode: countryCode(f.Teams.Home.Name), Name: koreanTeamName(f.Teams.Home.Name), Logo: f.Teams.Home.Logo, Score: f.Goals.Home},
-		Away:   worldcupTeam{ID: strconv.Itoa(f.Teams.Away.ID), CountryCode: countryCode(f.Teams.Away.Name), Name: koreanTeamName(f.Teams.Away.Name), Logo: f.Teams.Away.Logo, Score: f.Goals.Away},
+		Home:   worldcupTeam{ID: strconv.Itoa(f.Teams.Home.ID), CountryCode: countryCode(f.Teams.Home.Name), Name: koreanTeamName(f.Teams.Home.Name), Logo: f.Teams.Home.Logo, Score: f.Goals.Home, Winner: f.Teams.Home.Winner},
+		Away:   worldcupTeam{ID: strconv.Itoa(f.Teams.Away.ID), CountryCode: countryCode(f.Teams.Away.Name), Name: koreanTeamName(f.Teams.Away.Name), Logo: f.Teams.Away.Logo, Score: f.Goals.Away, Winner: f.Teams.Away.Winner},
 		Status: status, StatusLabel: statusLabel(status), Subtitle: subtitle, StartsAt: startLocal.Format(time.RFC3339), DisplayTime: startLocal.Format("15:04"), ExternalID: f.Fixture.ID,
 	}
 }
