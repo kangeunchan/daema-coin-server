@@ -11,7 +11,13 @@ import (
 
 func (s *postgresStore) customerProfileExists(ctx context.Context, id string) (bool, error) {
 	var exists bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM customer_profiles WHERE id = $1)`, id).Scan(&exists)
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM customer_profiles
+	WHERE id = $1
+		AND NULLIF(BTRIM(student_no), '') IS NOT NULL
+)`, id).Scan(&exists)
 	return exists, err
 }
 
@@ -25,7 +31,13 @@ func (s *postgresStore) saveCustomerProfile(ctx context.Context, user authUser, 
 		user.ID,
 	)
 	schoolName := stringValue(profile["schoolName"])
-	studentNo := stringValue(profile["studentNo"])
+	studentNo := strings.TrimSpace(stringValue(profile["studentNo"]))
+	if studentNo == "" {
+		return nil, errStudentNoRequired
+	}
+	if !validStudentNo(studentNo) {
+		return nil, errInvalidStudentNo
+	}
 	grade := stringValue(profile["grade"])
 	classNo := firstNonEmpty(stringValue(profile["classNo"]), stringValue(profile["class"]))
 
@@ -60,6 +72,10 @@ RETURNING created_at, updated_at`,
 		classNo,
 		now,
 	).Scan(&createdAt, &updatedAt); err != nil {
+		var stateErr sqlStateError
+		if errors.As(err, &stateErr) && stateErr.SQLState() == "23505" {
+			return nil, errDuplicateStudentNo
+		}
 		return nil, err
 	}
 
@@ -109,6 +125,18 @@ ON CONFLICT (github_id) DO UPDATE SET
 		"createdAt":   createdAt.UTC().Format(time.RFC3339),
 		"updatedAt":   updatedAt.UTC().Format(time.RFC3339),
 	}, nil
+}
+
+func validStudentNo(studentNo string) bool {
+	if len(studentNo) < 4 || len(studentNo) > 12 {
+		return false
+	}
+	for i := 0; i < len(studentNo); i++ {
+		if studentNo[i] < '0' || studentNo[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *postgresStore) customerProfiles(ctx context.Context, limit int) ([]map[string]any, error) {

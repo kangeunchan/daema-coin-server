@@ -80,7 +80,7 @@ erDiagram
         text id PK
         text display_name
         text school_name
-        text student_no
+        text student_no UK
         text status
     }
 

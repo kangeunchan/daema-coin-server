@@ -25,6 +25,7 @@ func TestPostgresStoreNormalizedAuthAndWallet(t *testing.T) {
 	defer store.close()
 
 	suffix := randomToken()[:12]
+	studentNo := integrationStudentNo()
 	user := authUser{
 		ID:        "test-customer-" + suffix,
 		GitHubID:  9000000001,
@@ -39,7 +40,7 @@ func TestPostgresStoreNormalizedAuthAndWallet(t *testing.T) {
 	if _, err := store.saveCustomerProfile(ctx, user, map[string]any{
 		"name":       "Test Customer",
 		"schoolName": "Daema High",
-		"studentNo":  "3101",
+		"studentNo":  studentNo,
 		"grade":      "3",
 		"classNo":    "1",
 	}); err != nil {
@@ -119,6 +120,40 @@ func TestPostgresStoreNormalizedAuthAndWallet(t *testing.T) {
 	}
 	if len(transactions) != 1 || transactions[0]["id"] != ledgerID {
 		t.Fatalf("transactions = %#v", transactions)
+	}
+}
+
+func TestPostgresStoreRejectsDuplicateStudentNumber(t *testing.T) {
+	store, ctx := openIntegrationStore(t)
+	suffix := randomToken()[:12]
+	studentNo := integrationStudentNo()
+	firstUser := authUser{ID: "test-student-first-" + suffix, Login: "first-" + suffix}
+	secondUser := authUser{ID: "test-student-second-" + suffix, Login: "second-" + suffix}
+
+	firstProfile, err := store.saveCustomerProfile(ctx, firstUser, map[string]any{
+		"name":      "First Student",
+		"studentNo": "  " + studentNo + "  ",
+	})
+	if err != nil {
+		t.Fatalf("save first student profile: %v", err)
+	}
+	if firstProfile["studentNo"] != studentNo {
+		t.Fatalf("normalized student number = %q, want %q", firstProfile["studentNo"], studentNo)
+	}
+	if _, err := store.saveCustomerProfile(ctx, firstUser, map[string]any{
+		"name":      "First Student Updated",
+		"studentNo": studentNo,
+	}); err != nil {
+		t.Fatalf("same customer could not update their profile: %v", err)
+	}
+	if _, err := store.saveCustomerProfile(ctx, secondUser, map[string]any{
+		"name":      "Second Student",
+		"studentNo": studentNo,
+	}); !errors.Is(err, errDuplicateStudentNo) {
+		t.Fatalf("duplicate student number error = %v, want errDuplicateStudentNo", err)
+	}
+	if found, err := store.customerProfileExists(ctx, secondUser.ID); err != nil || found {
+		t.Fatalf("duplicate customer profile exists = %v, err=%v; want false", found, err)
 	}
 }
 
@@ -233,7 +268,7 @@ func TestGitHubPushRewardsUseServerReceivedDate(t *testing.T) {
 		Provider: "github",
 		Roles:    []string{roleCustomer},
 	}
-	if _, err := store.saveCustomerProfile(ctx, user, map[string]any{"name": user.Name}); err != nil {
+	if _, err := store.saveCustomerProfile(ctx, user, map[string]any{"name": user.Name, "studentNo": integrationStudentNo()}); err != nil {
 		t.Fatalf("save GitHub reward customer: %v", err)
 	}
 
@@ -551,8 +586,12 @@ func createIntegrationCustomer(t *testing.T, store *postgresStore, ctx context.C
 		Provider: "github",
 		Roles:    []string{roleCustomer},
 	}
-	if _, err := store.saveCustomerProfile(ctx, user, map[string]any{"name": user.Name}); err != nil {
+	if _, err := store.saveCustomerProfile(ctx, user, map[string]any{"name": user.Name, "studentNo": integrationStudentNo()}); err != nil {
 		t.Fatalf("saveCustomerProfile(%s) failed: %v", id, err)
 	}
 	return user
+}
+
+func integrationStudentNo() string {
+	return fmt.Sprintf("%012d", time.Now().UnixNano()%1_000_000_000_000)
 }

@@ -24,6 +24,9 @@ var (
 	errPaymentNotFound           = errors.New("payment not found")
 	errPaymentClosed             = errors.New("payment is closed")
 	errPaymentRefundExceeded     = errors.New("payment refund exceeds captured amount")
+	errStudentNoRequired         = errors.New("student number is required")
+	errInvalidStudentNo          = errors.New("student number must contain 4 to 12 digits")
+	errDuplicateStudentNo        = errors.New("student number is already registered")
 )
 
 const serializableTxMaxAttempts = 3
