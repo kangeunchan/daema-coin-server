@@ -141,7 +141,8 @@ BEGIN
     FROM migration_legacy_resource_payloads source
     LEFT JOIN migration_resource_table_map target
         ON target.source_domain = source.domain
-    WHERE target.source_domain IS NULL;
+    WHERE target.source_domain IS NULL
+        AND source.domain NOT IN ('auth.oauth_states', 'auth.sessions');
 
     IF unknown_count > 0 THEN
         RAISE EXCEPTION 'legacy resource migration has % unmapped rows; refusing to drop public.records', unknown_count;
