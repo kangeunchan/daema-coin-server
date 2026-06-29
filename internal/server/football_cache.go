@@ -21,6 +21,10 @@ type redisFootballCache struct {
 	detailTTL time.Duration
 }
 
+// Bump this when the cached fixture schema changes so settlement workers never
+// consume stale fixtures that are missing result fields.
+const footballFixturesCacheVersion = "v2"
+
 type footballCacheJobSummary struct {
 	ID                    string    `json:"id"`
 	Name                  string    `json:"name"`
@@ -87,13 +91,13 @@ func (c *redisFootballCache) key(parts ...string) string {
 
 func (c *redisFootballCache) fixtures(ctx context.Context) ([]worldcupMatch, bool, error) {
 	var out []worldcupMatch
-	ok, err := c.getJSON(ctx, c.key("fixtures"), &out)
+	ok, err := c.getJSON(ctx, c.key("fixtures", footballFixturesCacheVersion), &out)
 	return out, ok, err
 }
 
 func (c *redisFootballCache) fixture(ctx context.Context, id string) (worldcupMatch, bool, error) {
 	var out worldcupMatch
-	ok, err := c.getJSON(ctx, c.key("fixtures", id), &out)
+	ok, err := c.getJSON(ctx, c.key("fixtures", footballFixturesCacheVersion, id), &out)
 	return out, ok, err
 }
 
@@ -111,14 +115,14 @@ func (c *redisFootballCache) lineups(ctx context.Context, id string) ([]map[stri
 
 func (c *redisFootballCache) saveFixtures(ctx context.Context, matches []worldcupMatch) error {
 	pipe := c.client.Pipeline()
-	c.setJSONPipe(ctx, pipe, c.key("fixtures"), matches)
+	c.setJSONPipe(ctx, pipe, c.key("fixtures", footballFixturesCacheVersion), matches)
 	for _, match := range matches {
 		if match.ID == "" {
 			continue
 		}
-		c.setJSONPipe(ctx, pipe, c.key("fixtures", match.ID), match)
+		c.setJSONPipe(ctx, pipe, c.key("fixtures", footballFixturesCacheVersion, match.ID), match)
 		if match.ExternalID > 0 && strconv.Itoa(match.ExternalID) != match.ID {
-			c.setJSONPipe(ctx, pipe, c.key("fixtures", strconv.Itoa(match.ExternalID)), match)
+			c.setJSONPipe(ctx, pipe, c.key("fixtures", footballFixturesCacheVersion, strconv.Itoa(match.ExternalID)), match)
 		}
 	}
 	_, err := pipe.Exec(ctx)

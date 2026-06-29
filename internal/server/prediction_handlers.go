@@ -210,6 +210,17 @@ func (s *server) predictionWinningPick(ctx context.Context, matchID string, body
 }
 
 func predictionWinningPickFromMatch(match worldcupMatch) (string, error) {
+	homeWinner := match.Home.Winner != nil && *match.Home.Winner
+	awayWinner := match.Away.Winner != nil && *match.Away.Winner
+	if homeWinner != awayWinner {
+		if homeWinner {
+			return "home", nil
+		}
+		return "away", nil
+	}
+	if homeWinner && awayWinner {
+		return "", errPredictionResultUnavailable
+	}
 	if match.Home.Score == nil || match.Away.Score == nil {
 		return "", errPredictionResultUnavailable
 	}
