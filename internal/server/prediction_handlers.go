@@ -23,34 +23,22 @@ func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	counts := map[string]int{"home": 0, "draw": 0, "away": 0}
+	_, stakeAmounts, total, totalStakeAmount := predictionSummaryTotals(items)
 	myPrediction := ""
 	myStakeAmount := 0
-	totalStakeAmount := 0
 	userID := s.currentUserID(r)
 	for _, item := range items {
 		pick := stringValue(item["pick"])
-		if _, ok := counts[pick]; ok {
-			counts[pick]++
-			totalStakeAmount += predictionStakeAmount(item)
-		}
 		if userID != "" && stringValue(item["userId"]) == userID {
 			myPrediction = pick
 			myStakeAmount = predictionStakeAmount(item)
 		}
 	}
-	total := counts["home"] + counts["draw"] + counts["away"]
-	percent := func(count int) int {
-		if total == 0 {
-			return 0
-		}
-		return int(math.Round(float64(count) / float64(total) * 100))
-	}
 	data := map[string]any{
 		"matchId":          matchID,
-		"homePercent":      percent(counts["home"]),
-		"drawPercent":      percent(counts["draw"]),
-		"awayPercent":      percent(counts["away"]),
+		"homePercent":      predictionStakePercent(stakeAmounts["home"], totalStakeAmount),
+		"drawPercent":      predictionStakePercent(stakeAmounts["draw"], totalStakeAmount),
+		"awayPercent":      predictionStakePercent(stakeAmounts["away"], totalStakeAmount),
 		"totalCount":       total,
 		"totalStakeAmount": totalStakeAmount,
 		"canPredict":       myPrediction == "" && (!matchStatusKnown || match.Status == "scheduled"),
@@ -67,6 +55,32 @@ func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request)
 		data["myStakeAmount"] = myStakeAmount
 	}
 	s.ok(w, r, data)
+}
+
+func predictionSummaryTotals(items []map[string]any) (map[string]int, map[string]int, int, int) {
+	counts := map[string]int{"home": 0, "draw": 0, "away": 0}
+	stakeAmounts := map[string]int{"home": 0, "draw": 0, "away": 0}
+	totalCount := 0
+	totalStakeAmount := 0
+	for _, item := range items {
+		pick := stringValue(item["pick"])
+		if _, ok := counts[pick]; !ok {
+			continue
+		}
+		stakeAmount := predictionStakeAmount(item)
+		counts[pick]++
+		stakeAmounts[pick] += stakeAmount
+		totalCount++
+		totalStakeAmount += stakeAmount
+	}
+	return counts, stakeAmounts, totalCount, totalStakeAmount
+}
+
+func predictionStakePercent(stakeAmount, totalStakeAmount int) int {
+	if totalStakeAmount == 0 {
+		return 0
+	}
+	return int(math.Round(float64(stakeAmount) / float64(totalStakeAmount) * 100))
 }
 
 func (s *server) handlePredictionCreate(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,29 @@ package server
 
 import "testing"
 
+func TestPredictionSummaryPercentagesUseStakeAmounts(t *testing.T) {
+	counts, stakeAmounts, totalCount, totalStakeAmount := predictionSummaryTotals([]map[string]any{
+		{"pick": "home", "stakeAmount": 10000},
+		{"pick": "away", "stakeAmount": 100},
+		{"pick": "away", "stakeAmount": 100},
+	})
+	if totalCount != 3 || counts["home"] != 1 || counts["away"] != 2 {
+		t.Fatalf("counts = %#v, totalCount = %d; want one home and two away", counts, totalCount)
+	}
+	if totalStakeAmount != 10200 {
+		t.Fatalf("total stake = %d, want 10200", totalStakeAmount)
+	}
+	if got := predictionStakePercent(stakeAmounts["home"], totalStakeAmount); got != 98 {
+		t.Fatalf("home percent = %d, want 98", got)
+	}
+	if got := predictionStakePercent(stakeAmounts["away"], totalStakeAmount); got != 2 {
+		t.Fatalf("away percent = %d, want 2", got)
+	}
+	if got := predictionStakePercent(0, 0); got != 0 {
+		t.Fatalf("empty percent = %d, want 0", got)
+	}
+}
+
 func TestStrictAmountValueRejectsUnsafeAmounts(t *testing.T) {
 	valid := []map[string]any{
 		{"amount": 1},
