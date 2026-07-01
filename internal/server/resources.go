@@ -20,6 +20,9 @@ const (
 	commitRewardPoints   = 500
 	commitRewardLimit    = 10
 	commitRewardCurrency = "POINT"
+	commitDailyGoal      = 10
+	commitStreakCurrency = "POINT"
+	commitStreakType     = "github-commit-streak-reward"
 )
 
 const (

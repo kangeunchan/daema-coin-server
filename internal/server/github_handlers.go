@@ -64,6 +64,19 @@ func (s *server) handleCommitTransactions(w http.ResponseWriter, r *http.Request
 	s.okPage(w, r, transactions, &pagination{Limit: limit, HasMore: len(commits) > len(transactions)})
 }
 
+func (s *server) handleCommitRewardSummary(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireGitHubSession(w, r)
+	if !ok {
+		return
+	}
+	summary, err := s.commitRewardSummary(r.Context(), session.User, session.User.Login, time.Now())
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "COMMIT_REWARD_SUMMARY_FAILED", "커밋 리워드 현황을 불러오지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	s.ok(w, r, summary)
+}
+
 func (s *server) handleGitHubCommits(w http.ResponseWriter, r *http.Request) {
 	session, ok := s.requireGitHubSession(w, r)
 	if !ok {

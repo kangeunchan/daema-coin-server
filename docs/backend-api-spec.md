@@ -291,6 +291,8 @@ http://localhost:8080/api/auth/github/callback
 
 커밋 리워드는 GitHub App `push` webhook에서 신규 커밋이 처음 저장될 때 지급한다. 커밋 1개당 대마포인트(`POINT`) 500P를 지급하고, 사용자별 하루 최대 10개 커밋까지만 포인트를 지급한다. 하루 지급 한도를 초과한 커밋은 커밋 내역에는 저장하지만 `rewardedPoints`는 0으로 기록한다.
 
+연속 커밋은 KST(`Asia/Seoul`) 기준으로 하루 커밋 10개 이상을 채운 날짜만 1일로 인정한다. 7일째에는 5,000 POINT, 14일째에는 15,000 POINT를 추가 지급한다. 마일스톤 원장 ID는 사용자·마일스톤·달성 날짜로 고정해 webhook 재전송 시에도 중복 지급되지 않으며, 연속 기록이 끊긴 뒤 새 기록을 달성하면 다시 지급할 수 있다.
+
 GitHub App webhook 설정:
 
 | 항목 | 값 |
@@ -314,6 +316,32 @@ GitHub App webhook 설정:
 | `GET` | `/api/customer/points/commit-activity` | 포인트 화면용 커밋 활동 |
 | `GET` | `/api/customer/points/commit-stats` | 포인트 화면용 커밋 통계 |
 | `GET` | `/api/customer/points/commit-transactions` | 커밋 보상 거래 |
+| `GET` | `/api/customer/points/commit-reward-summary` | 10커밋 일일 달성, 연속 기록, 7일/14일 지급 상태 |
+
+`GET /api/customer/points/commit-reward-summary` 응답의 `data` 예시:
+
+```json
+{
+  "committedToday": true,
+  "currentStreakDays": 7,
+  "dailyCommitGoal": 10,
+  "lastCommittedAt": "2026-07-01T02:42:00Z",
+  "longestStreakDays": 11,
+  "milestones": [
+    {
+      "achievedAt": "2026-07-01",
+      "days": 7,
+      "paidAt": "2026-07-01T02:42:01Z",
+      "rewardAmount": 5000,
+      "status": "paid"
+    },
+    { "days": 14, "rewardAmount": 15000, "status": "locked" }
+  ],
+  "rewardCurrency": "POINT",
+  "todayCommitCount": 10,
+  "totalRewardAmount": 5000
+}
+```
 
 Query:
 

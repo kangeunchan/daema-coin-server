@@ -323,6 +323,84 @@ func TestGitHubPushRewardsUseServerReceivedDate(t *testing.T) {
 	}
 }
 
+func TestGitHubCommitStreakRewardsAtSevenAndFourteenDays(t *testing.T) {
+	store, ctx := openIntegrationStore(t)
+	suffix := randomToken()[:12]
+	user := authUser{
+		ID:       "test-github-streak-" + suffix,
+		GitHubID: time.Now().UnixNano(),
+		Login:    "test-github-streak-login-" + suffix,
+		Name:     "Test GitHub Streak Reward",
+		Provider: "github",
+		Roles:    []string{roleCustomer},
+	}
+	if _, err := store.saveCustomerProfile(ctx, user, map[string]any{"name": user.Name, "studentNo": integrationStudentNo()}); err != nil {
+		t.Fatalf("save GitHub streak customer: %v", err)
+	}
+
+	srv := &server{store: store}
+	start := time.Date(2026, time.June, 18, 12, 0, 0, 0, appLocation())
+	var lastPayload []byte
+	for day := 0; day < 14; day++ {
+		commits := make([]map[string]any, 0, commitDailyGoal)
+		for index := 0; index < commitDailyGoal; index++ {
+			commits = append(commits, map[string]any{
+				"id":        fmt.Sprintf("streak-sha-%s-%02d-%02d", suffix, day, index),
+				"message":   "streak test commit",
+				"timestamp": start.AddDate(0, 0, day).Add(time.Duration(index) * time.Minute).Format(time.RFC3339),
+				"url":       "https://github.com/test/streak/commit/test",
+				"distinct":  true,
+				"author":    map[string]any{"username": user.Login},
+			})
+		}
+		payload, err := json.Marshal(map[string]any{
+			"repository": map[string]any{"id": day + 1, "full_name": fmt.Sprintf("test/streak-%s-%02d", suffix, day)},
+			"sender":     map[string]any{"login": user.Login},
+			"commits":    commits,
+		})
+		if err != nil {
+			t.Fatalf("marshal streak payload day %d: %v", day, err)
+		}
+		lastPayload = payload
+		stored, err := srv.storeGitHubPushEventAt(ctx, fmt.Sprintf("streak-delivery-%s-%02d", suffix, day), payload, start.AddDate(0, 0, day).UTC())
+		if err != nil {
+			t.Fatalf("store streak payload day %d: %v", day, err)
+		}
+		if stored != commitDailyGoal {
+			t.Fatalf("stored commits on day %d = %d, want %d", day, stored, commitDailyGoal)
+		}
+	}
+
+	wantBalance := 14*commitDailyGoal*commitRewardPoints + 5_000 + 15_000
+	if balance, err := store.walletBalance(ctx, user.ID, commitStreakCurrency); err != nil || balance != wantBalance {
+		t.Fatalf("streak reward balance = %d, err=%v; want %d", balance, err, wantBalance)
+	}
+	total, err := store.ledgerIncomeTotalByType(ctx, user.ID, commitStreakType)
+	if err != nil || total != 20_000 {
+		t.Fatalf("streak reward total = %d, err=%v; want 20000", total, err)
+	}
+	summary, err := srv.commitRewardSummary(ctx, user, user.Login, start.AddDate(0, 0, 13))
+	if err != nil {
+		t.Fatalf("commit reward summary: %v", err)
+	}
+	if summary.CurrentStreakDays != 14 || summary.LongestStreakDays != 14 || summary.TotalRewardAmount != 20_000 {
+		t.Fatalf("commit reward summary = %#v", summary)
+	}
+	for _, milestone := range summary.Milestones {
+		if milestone.Status != "paid" || milestone.PaidAt == "" {
+			t.Fatalf("milestone was not paid: %#v", milestone)
+		}
+	}
+
+	stored, err := srv.storeGitHubPushEventAt(ctx, "streak-delivery-replay-"+suffix, lastPayload, start.AddDate(0, 0, 13).UTC())
+	if err != nil || stored != 0 {
+		t.Fatalf("replay stored=%d err=%v, want 0 and nil", stored, err)
+	}
+	if balance, err := store.walletBalance(ctx, user.ID, commitStreakCurrency); err != nil || balance != wantBalance {
+		t.Fatalf("balance after replay = %d, err=%v; want %d", balance, err, wantBalance)
+	}
+}
+
 func TestLegacyGitHubCommitMigrationUsesDatabaseCreatedAt(t *testing.T) {
 	store, ctx := openIntegrationStore(t)
 	suffix := randomToken()[:12]
