@@ -113,6 +113,32 @@ LIMIT $2`, userID, limit)
 	return items, rows.Err()
 }
 
+func (s *postgresStore) ledgerTransactionOccurredAt(ctx context.Context, userID, id string) (time.Time, bool, error) {
+	var occurredAt time.Time
+	err := s.db.QueryRowContext(ctx, `
+SELECT occurred_at
+FROM ledger_transactions
+WHERE customer_id = $1 AND id = $2`, userID, id).Scan(&occurredAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return occurredAt, true, nil
+}
+
+func (s *postgresStore) ledgerIncomeTotalByType(ctx context.Context, userID, transactionType string) (int, error) {
+	var total int
+	err := s.db.QueryRowContext(ctx, `
+SELECT COALESCE(SUM(amount), 0)
+FROM ledger_transactions
+WHERE customer_id = $1
+	AND transaction_type = $2
+	AND direction = 'income'`, userID, transactionType).Scan(&total)
+	return total, err
+}
+
 func (s *postgresStore) createLedgerAndAdjustWallet(ctx context.Context, user authUser, id, txType, direction, currency string, value int, extras map[string]any) (bool, error) {
 	return s.createLedgerAndAdjustWalletRequest(ctx, newWalletLedgerRequest(user, id, txType, direction, currency, value, extras))
 }

@@ -65,6 +65,7 @@ func (s *server) routes() http.Handler {
 	routes.customer("GET /api/customer/points/commit-activity", s.handleCommitActivity)
 	routes.customer("GET /api/customer/points/commit-stats", s.handleCommitStats)
 	routes.customer("GET /api/customer/points/commit-transactions", s.handleCommitTransactions)
+	routes.customer("GET /api/customer/points/commit-reward-summary", s.handleCommitRewardSummary)
 	routes.customer("GET /api/customer/github/commits", s.handleGitHubCommits)
 	routes.customer("GET /api/customer/github/commit-activity", s.handleCommitActivity)
 	routes.customer("GET /api/customer/github/commit-stats", s.handleCommitStats)

@@ -5,19 +5,19 @@ import (
 	"time"
 )
 
-func (s *server) githubCommitReward(ctx context.Context, authorLogin string, receivedAt time.Time) (int, authUser, error) {
+func (s *server) githubCommitReward(ctx context.Context, authorLogin string, receivedAt time.Time) (int, int, authUser, error) {
 	user, ok, err := s.authUserForGitHubLogin(ctx, authorLogin)
 	if err != nil || !ok {
-		return 0, authUser{}, err
+		return 0, 0, authUser{}, err
 	}
 	rewardedCount, err := s.rewardedGitHubCommitCountForDay(ctx, authorLogin, receivedAt)
 	if err != nil {
-		return 0, authUser{}, err
+		return 0, 0, authUser{}, err
 	}
 	if rewardedCount >= commitRewardLimit {
-		return 0, user, nil
+		return 0, rewardedCount, user, nil
 	}
-	return commitRewardPoints, user, nil
+	return commitRewardPoints, rewardedCount, user, nil
 }
 
 func (s *server) authUserForGitHubLogin(ctx context.Context, login string) (authUser, bool, error) {

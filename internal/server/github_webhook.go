@@ -148,7 +148,7 @@ func (s *server) storeGitHubPushEventAt(ctx context.Context, deliveryID string, 
 		}
 		occurredAt, commitTimestamp := githubWebhookCommitTimes(receivedAt, commit.Timestamp)
 		authorLogin := firstNonEmpty(commit.Author.Username, commit.Committer.Username, payload.Sender.Login, payload.Pusher.Name)
-		rewardPoints, rewardUser, err := s.githubCommitReward(ctx, authorLogin, receivedAt)
+		rewardPoints, rewardedCount, rewardUser, err := s.githubCommitReward(ctx, authorLogin, receivedAt)
 		if err != nil {
 			return count, err
 		}
@@ -190,6 +190,9 @@ func (s *server) storeGitHubPushEventAt(ctx context.Context, deliveryID string, 
 			return count, err
 		}
 		if !created {
+			if err := s.grantGitHubCommitStreakRewards(ctx, rewardUser, authorLogin, occurredAt); err != nil {
+				return count, err
+			}
 			continue
 		}
 		if rewardPoints > 0 && rewardUser.ID != "" {
@@ -201,6 +204,11 @@ func (s *server) storeGitHubPushEventAt(ctx context.Context, deliveryID string, 
 				"occurredAt":  receivedAt.Format(time.RFC3339),
 			})
 			if err != nil {
+				return count, err
+			}
+		}
+		if rewardedCount+1 == commitDailyGoal {
+			if err := s.grantGitHubCommitStreakRewards(ctx, rewardUser, authorLogin, occurredAt); err != nil {
 				return count, err
 			}
 		}
