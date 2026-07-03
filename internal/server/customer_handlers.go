@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+const excludedUserRankingGitHubLogin = "kangeunchan"
+
 func (s *server) walletBalance(ctx context.Context, userID, currency string) (int, error) {
 	return s.store.walletBalance(ctx, userID, currency)
 }
@@ -208,7 +210,11 @@ func (s *server) handleRankings(w http.ResponseWriter, r *http.Request) {
 			s.ok(w, r, rankings)
 			return
 		}
-		s.respondResourceList(w, r, resourceUserRankings, 20)
+		items, _, ok := s.listResources(w, r, resourceUserRankings, 21)
+		if !ok {
+			return
+		}
+		s.okPage(w, r, filterUserRankings(items, 20), &pagination{Limit: 20, HasMore: false})
 	default:
 		users, err := s.userPointRankings(r.Context(), 20)
 		if err != nil {
@@ -217,10 +223,11 @@ func (s *server) handleRankings(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(users) == 0 {
 			var ok bool
-			users, _, ok = s.listResources(w, r, resourceUserRankings, 20)
+			users, _, ok = s.listResources(w, r, resourceUserRankings, 21)
 			if !ok {
 				return
 			}
+			users = filterUserRankings(users, 20)
 		}
 		booths, _, ok := s.listResources(w, r, resourceBoothRankings, 20)
 		if !ok {
@@ -286,13 +293,23 @@ func (s *server) userPointRankings(ctx context.Context, limit int) ([]map[string
 	sort.SliceStable(items, func(i, j int) bool {
 		return amountValue(map[string]any{"amount": items[i]["points"]}) > amountValue(map[string]any{"amount": items[j]["points"]})
 	})
-	if limit > 0 && len(items) > limit {
-		items = items[:limit]
+	return filterUserRankings(items, limit), nil
+}
+
+func filterUserRankings(items []map[string]any, limit int) []map[string]any {
+	filtered := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		login := firstNonEmpty(stringValue(item["githubLogin"]), stringValue(item["login"]))
+		if strings.EqualFold(strings.TrimSpace(login), excludedUserRankingGitHubLogin) {
+			continue
+		}
+		item["rank"] = len(filtered) + 1
+		filtered = append(filtered, item)
+		if limit > 0 && len(filtered) >= limit {
+			break
+		}
 	}
-	for i := range items {
-		items[i]["rank"] = i + 1
-	}
-	return items, nil
+	return filtered
 }
 
 func (s *server) handleFestivalBanner(w http.ResponseWriter, r *http.Request) {
