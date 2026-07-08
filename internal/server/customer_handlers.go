@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -433,6 +434,10 @@ func (s *server) handleBoothHome(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if err := s.decorateProductsWithViewCounts(r.Context(), products); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "상품 조회수를 읽지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
 	booths, _, ok := s.listResources(w, r, resourceBooths, 50)
 	if !ok {
 		return
@@ -441,11 +446,19 @@ func (s *server) handleBoothHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleBoothProducts(w http.ResponseWriter, r *http.Request) {
-	s.respondResourceList(w, r, resourceProducts, 100,
+	items, limit, ok := s.listResources(w, r, resourceProducts, 100,
 		resourceFilter{Field: "boothId", Value: r.PathValue("boothId")},
 		resourceFilter{Field: "categoryId", Value: r.URL.Query().Get("categoryId")},
 		resourceFilter{Field: "status", Value: r.URL.Query().Get("status")},
 	)
+	if !ok {
+		return
+	}
+	if err := s.decorateProductsWithViewCounts(r.Context(), items); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "상품 조회수를 읽지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	s.okPage(w, r, items, &pagination{Limit: limit, HasMore: false})
 }
 
 func (s *server) handleBoothProduct(w http.ResponseWriter, r *http.Request) {
@@ -459,6 +472,10 @@ func (s *server) handleBoothProduct(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusNotFound, "PRODUCT_NOT_FOUND", "상품을 찾을 수 없습니다.", map[string]any{"productId": id})
 		return
 	}
+	if err := s.decorateProductsWithViewCounts(r.Context(), []map[string]any{item}); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "상품 조회수를 읽지 못했습니다.", map[string]any{"productId": id, "cause": err.Error()})
+		return
+	}
 	s.ok(w, r, item)
 }
 
@@ -467,12 +484,88 @@ func (s *server) handleProductView(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := s.customers().CreateProductView(r.Context(), r.PathValue("productId"), s.currentUserID(r), body)
+	productID := r.PathValue("productId")
+	item, err := s.customers().CreateProductView(r.Context(), productID, s.currentUserID(r), body)
 	if err != nil {
 		s.failResourceCommand(w, r, resourceProductViews, "", "create", err)
 		return
 	}
+	if counts, err := s.productViewCounts(r.Context(), []string{productID}); err == nil {
+		count := counts[productID]
+		item["viewCount"] = count
+		item["meta"] = productViewMeta(count)
+	}
 	s.created(w, r, item)
+}
+
+func (s *server) decorateProductsWithViewCounts(ctx context.Context, products []map[string]any) error {
+	productIDs := make([]string, 0, len(products))
+	for _, product := range products {
+		if id := resourceID(product, "productId"); id != "" {
+			productIDs = append(productIDs, id)
+		}
+	}
+	counts, err := s.productViewCounts(ctx, productIDs)
+	if err != nil {
+		return err
+	}
+	for _, product := range products {
+		id := resourceID(product, "productId")
+		count := counts[id]
+		product["viewCount"] = count
+		product["meta"] = productViewMeta(count)
+	}
+	return nil
+}
+
+func (s *server) productViewCounts(ctx context.Context, productIDs []string) (map[string]int, error) {
+	uniqueIDs := make([]string, 0, len(productIDs))
+	seen := map[string]bool{}
+	for _, productID := range productIDs {
+		productID = strings.TrimSpace(productID)
+		if productID == "" || seen[productID] {
+			continue
+		}
+		seen[productID] = true
+		uniqueIDs = append(uniqueIDs, productID)
+	}
+	counts := make(map[string]int, len(uniqueIDs))
+	for _, productID := range uniqueIDs {
+		counts[productID] = 0
+	}
+	if len(uniqueIDs) == 0 {
+		return counts, nil
+	}
+
+	args := make([]any, len(uniqueIDs))
+	placeholders := make([]string, len(uniqueIDs))
+	for index, productID := range uniqueIDs {
+		args[index] = productID
+		placeholders[index] = fmt.Sprintf("$%d", index+1)
+	}
+	rows, err := s.store.db.QueryContext(ctx, fmt.Sprintf(`
+SELECT payload->>'productId', COUNT(*)
+FROM product_view_events
+WHERE payload->>'productId' IN (%s)
+GROUP BY payload->>'productId'
+`, strings.Join(placeholders, ",")), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var productID string
+		var count int
+		if err := rows.Scan(&productID, &count); err != nil {
+			return nil, err
+		}
+		counts[productID] = count
+	}
+	return counts, rows.Err()
+}
+
+func productViewMeta(count int) string {
+	return "조회 " + number(count) + "회"
 }
 
 func (s *server) handleCustomerBooth(w http.ResponseWriter, r *http.Request) {
