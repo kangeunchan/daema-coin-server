@@ -19,6 +19,7 @@ func (s *server) routes() http.Handler {
 	routes.public("POST /api/auth/logout", s.handleAuthLogout)
 	routes.public("GET /api/github/app/setup", s.handleGitHubAppSetup)
 	routes.public("POST /api/github/webhooks", s.handleGitHubWebhook)
+	routes.public("GET /api/files/{fileId}", s.handleFileDownload)
 
 	routes.customer("GET /api/customer/me", s.handleCustomerMe)
 	routes.customer("GET /api/customer/navigation", s.handleNavigation)

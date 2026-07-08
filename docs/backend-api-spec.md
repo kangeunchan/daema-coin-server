@@ -92,6 +92,12 @@ REDIS_URL=redis://localhost:6379/0
 | `APP_TIMEZONE` | N | `Asia/Seoul` | 날짜 그룹/오늘 판단 기준 timezone |
 | `SESSION_COOKIE_DOMAIN` | N | empty | 세션 쿠키 domain override |
 | `HTTP_MAX_JSON_BODY_BYTES` | N | `1048576` | JSON API 요청 본문 최대 크기 |
+| `FILE_UPLOAD_MAX_BYTES` | N | `52428800` | multipart 파일 업로드 최대 크기 |
+| `SEAWEEDFS_MASTER_URL` | Y for multipart upload | `http://localhost:9333` | 서버가 파일 할당을 요청할 SeaweedFS master 내부 주소 |
+| `SEAWEEDFS_VOLUME_BASE_URL` | Y for file proxy | `http://localhost:8080` | 서버가 파일 다운로드를 프록시할 SeaweedFS volume 내부 주소 |
+| `SEAWEEDFS_PUBLIC_BASE_URL` | N | `http://localhost:8080/api/files` | 업로드 응답에 내려줄 공개 파일 base URL. 서버 프록시를 쓸 때는 API 서버의 `/api/files` 주소로 설정 |
+| `SEAWEEDFS_VOLUME_SCHEME` | N | `http` | SeaweedFS assign 응답이 scheme 없이 올 때 업로드에 사용할 scheme |
+| `SEAWEEDFS_HTTP_TIMEOUT` | N | `15s` | SeaweedFS HTTP 요청 timeout |
 | `CSRF_ALLOW_MISSING_ORIGIN` | N | `false` | 쿠키 기반 변경 요청에서 Origin/Referer 누락을 허용할지 여부 |
 | `GITHUB_OAUTH_CLIENT_ID` | Y | GitHub OAuth App client id | GitHub OAuth client id |
 | `GITHUB_OAUTH_CLIENT_SECRET` | Y | GitHub OAuth App secret | GitHub OAuth client secret |
@@ -228,6 +234,7 @@ http://localhost:8080/api/auth/github/callback
 | `PUT` | `/api/auth/me/student-profile` | 고객 학생 프로필 저장 |
 | `POST` | `/api/auth/logout` | 로그아웃 |
 | `POST` | `/api/files/uploads` | 파일 업로드 메타 저장. 관리자 또는 부스 계정 필요 |
+| `GET` | `/api/files/{fileId}` | SeaweedFS 파일을 서버에서 스트리밍 |
 | `GET` | `/api/search/suggestions` | 검색 제안 목록 |
 | `GET` | `/api/search` | 통합 검색 |
 

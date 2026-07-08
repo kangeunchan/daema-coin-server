@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -71,6 +72,69 @@ func (s *server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.created(w, r, item)
+}
+
+func (s *server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
+	fileID := strings.TrimSpace(r.PathValue("fileId"))
+	if !validSeaweedFileID(fileID) {
+		s.fail(w, r, http.StatusBadRequest, "INVALID_FILE_ID", "파일 ID가 올바르지 않습니다.", nil)
+		return
+	}
+
+	fileURL, err := seaweedDownloadURL(fileID)
+	if err != nil {
+		if errors.Is(err, errFileStorageNotConfigured) {
+			s.fail(w, r, http.StatusServiceUnavailable, "FILE_STORAGE_NOT_CONFIGURED", "파일 저장소 설정이 필요합니다.", map[string]any{"required": []string{"SEAWEEDFS_VOLUME_BASE_URL"}})
+			return
+		}
+		s.fail(w, r, http.StatusBadRequest, "INVALID_FILE_STORAGE_URL", "파일 저장소 주소가 올바르지 않습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+
+	client := &http.Client{Timeout: envDuration("SEAWEEDFS_HTTP_TIMEOUT", 15*time.Second)}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, fileURL, nil)
+	if err != nil {
+		s.fail(w, r, http.StatusBadRequest, "INVALID_FILE_STORAGE_URL", "파일 저장소 주소가 올바르지 않습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		s.fail(w, r, http.StatusBadGateway, "FILE_STORAGE_UNAVAILABLE", "파일 저장소에서 파일을 가져오지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		s.fail(w, r, http.StatusNotFound, "FILE_NOT_FOUND", "파일을 찾을 수 없습니다.", nil)
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		s.fail(w, r, http.StatusBadGateway, "FILE_STORAGE_ERROR", "파일 저장소 응답이 올바르지 않습니다.", map[string]any{
+			"status": resp.StatusCode,
+			"cause":  strings.TrimSpace(string(data)),
+		})
+		return
+	}
+
+	copyHeader(w.Header(), resp.Header, "Content-Type")
+	copyHeader(w.Header(), resp.Header, "Content-Length")
+	copyHeader(w.Header(), resp.Header, "Content-Range")
+	copyHeader(w.Header(), resp.Header, "Accept-Ranges")
+	copyHeader(w.Header(), resp.Header, "ETag")
+	copyHeader(w.Header(), resp.Header, "Last-Modified")
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		// The client may disconnect while streaming a file. Headers are already sent.
+		return
+	}
 }
 
 func (s *server) uploadMultipartFile(w http.ResponseWriter, r *http.Request) (fileUploadResult, error) {
@@ -183,10 +247,47 @@ func seaweedPublicURL(assign seaweedAssignResponse) string {
 	if base := strings.TrimRight(env("SEAWEEDFS_PUBLIC_BASE_URL", ""), "/"); base != "" {
 		return base + "/" + assign.FileID
 	}
-	publicURL := firstNonEmpty(assign.PublicURL, assign.URL)
-	if strings.HasPrefix(publicURL, "http://") || strings.HasPrefix(publicURL, "https://") {
-		return strings.TrimRight(publicURL, "/") + "/" + assign.FileID
+	return "/api/files/" + assign.FileID
+}
+
+func seaweedDownloadURL(fileID string) (string, error) {
+	base := strings.TrimRight(env("SEAWEEDFS_VOLUME_BASE_URL", ""), "/")
+	if base == "" {
+		return "", errFileStorageNotConfigured
 	}
-	scheme := env("SEAWEEDFS_VOLUME_SCHEME", "http")
-	return scheme + "://" + strings.TrimRight(publicURL, "/") + "/" + assign.FileID
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("unsupported scheme %q", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return "", errors.New("missing host")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/" + fileID
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func validSeaweedFileID(fileID string) bool {
+	if fileID == "" || len(fileID) > 256 {
+		return false
+	}
+	if strings.ContainsAny(fileID, `/\`) {
+		return false
+	}
+	for _, r := range fileID {
+		if r <= 31 || r == 127 {
+			return false
+		}
+	}
+	return true
+}
+
+func copyHeader(dst, src http.Header, key string) {
+	if value := src.Get(key); value != "" {
+		dst.Set(key, value)
+	}
 }

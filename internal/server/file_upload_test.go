@@ -75,3 +75,60 @@ func TestUploadFileToSeaweedFS(t *testing.T) {
 		t.Fatalf("Provider = %q, want seaweedfs", result.Provider)
 	}
 }
+
+func TestSeaweedPublicURLDefaultsToServerProxy(t *testing.T) {
+	t.Setenv("SEAWEEDFS_PUBLIC_BASE_URL", "")
+
+	got := seaweedPublicURL(seaweedAssignResponse{FileID: "3,abc123", URL: "volume:8080"})
+	if got != "/api/files/3,abc123" {
+		t.Fatalf("seaweedPublicURL() = %q, want server proxy URL", got)
+	}
+}
+
+func TestHandleFileDownloadStreamsFromSeaweedFS(t *testing.T) {
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3,abc123" {
+			t.Fatalf("unexpected SeaweedFS request path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("ETag", `"file-etag"`)
+		_, _ = w.Write([]byte("image-bytes"))
+	}))
+	defer storage.Close()
+
+	t.Setenv("SEAWEEDFS_VOLUME_BASE_URL", storage.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/files/3,abc123", nil)
+	rec := httptest.NewRecorder()
+
+	(&server{}).routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("Content-Type = %q, want image/png", rec.Header().Get("Content-Type"))
+	}
+	if rec.Header().Get("ETag") != `"file-etag"` {
+		t.Fatalf("ETag = %q, want upstream ETag", rec.Header().Get("ETag"))
+	}
+	if rec.Body.String() != "image-bytes" {
+		t.Fatalf("body = %q, want image-bytes", rec.Body.String())
+	}
+}
+
+func TestHandleFileDownloadRequiresVolumeBaseURL(t *testing.T) {
+	t.Setenv("SEAWEEDFS_VOLUME_BASE_URL", "")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/files/3,abc123", nil)
+	rec := httptest.NewRecorder()
+
+	(&server{}).routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "SEAWEEDFS_VOLUME_BASE_URL") {
+		t.Fatalf("response body does not mention required env: %s", rec.Body.String())
+	}
+}
