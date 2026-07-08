@@ -10,6 +10,9 @@ var (
 	errCustomerProductRequired = errors.New("productId is required")
 	errCustomerOrderRequired   = errors.New("order product or items are required")
 	errCustomerQuantityInvalid = errors.New("quantity must be a positive integer")
+	errCustomerProductNotFound = errors.New("product not found")
+	errCustomerProductClosed   = errors.New("product is not available")
+	errCustomerStockShortage   = errors.New("product stock is not enough")
 )
 
 type customerService struct {

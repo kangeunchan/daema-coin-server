@@ -29,6 +29,7 @@ const (
 	roleCustomer = "customer"
 	roleAdmin    = "admin"
 	roleBooth    = "booth"
+	roleTeacher  = "teacher"
 )
 
 type authSession struct {
@@ -149,6 +150,14 @@ func (s *server) handleGitHubSession(w http.ResponseWriter, r *http.Request) {
 	session, ok := s.sessionFromRequest(r)
 	if !ok {
 		s.fail(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "GitHub 로그인이 필요합니다.", nil)
+		return
+	}
+	if sessionHasRole(session, roleTeacher) {
+		if err := s.ensureTeacherCustomerProfile(r.Context(), session.User); err != nil {
+			s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "교사용 테스트 고객 프로필을 저장하지 못했습니다.", map[string]any{"cause": err.Error()})
+			return
+		}
+		s.ok(w, r, map[string]any{"status": "authenticated"})
 		return
 	}
 	if found, err := s.store.customerProfileExists(r.Context(), session.User.ID); err != nil {
@@ -282,6 +291,10 @@ func (s *server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	s.handleInternalLogin(w, r, roleAdmin)
 }
 
+func (s *server) handleTeacherLogin(w http.ResponseWriter, r *http.Request) {
+	s.handleInternalLogin(w, r, roleTeacher)
+}
+
 func (s *server) handleInternalLogin(w http.ResponseWriter, r *http.Request, requiredRole string) {
 	body, ok := s.requestPayload(w, r)
 	if !ok {
@@ -311,11 +324,28 @@ func (s *server) handleInternalLogin(w http.ResponseWriter, r *http.Request, req
 		s.fail(w, r, http.StatusForbidden, "ROLE_NOT_ALLOWED", "해당 로그인 화면에서 사용할 수 없는 계정입니다.", nil)
 		return
 	}
+	if requiredRole == roleTeacher && strings.EqualFold(strings.TrimSpace(account.CreatedBy), "bootstrap") {
+		s.fail(w, r, http.StatusForbidden, "ROLE_NOT_ALLOWED", "티처 계정은 관리자 콘솔에서 발급해야 합니다.", nil)
+		return
+	}
 
 	account.LastLoginAt = time.Now().UTC().Format(time.RFC3339)
 	if _, err := s.store.saveInternalAccount(r.Context(), account); err != nil {
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "로그인 상태를 저장하지 못했습니다.", map[string]any{"cause": err.Error()})
 		return
+	}
+
+	if normalizeInternalRole(account.Role) == roleTeacher {
+		if err := s.ensureTeacherCustomerProfile(r.Context(), authUser{
+			ID:       account.ID,
+			Login:    account.LoginID,
+			Name:     envDefault(account.DisplayName, account.LoginID),
+			Provider: "internal",
+			Roles:    []string{roleTeacher},
+		}); err != nil {
+			s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "교사용 테스트 고객 프로필을 저장하지 못했습니다.", map[string]any{"cause": err.Error()})
+			return
+		}
 	}
 
 	user := authUser{
@@ -346,23 +376,33 @@ func (s *server) handleInternalLogin(w http.ResponseWriter, r *http.Request, req
 func (s *server) ensureBootstrapAccounts(ctx context.Context) error {
 	adminLogin := env("BOOTSTRAP_ADMIN_LOGIN", "")
 	adminPassword := env("BOOTSTRAP_ADMIN_PASSWORD", "")
-	if adminLogin == "" && adminPassword == "" {
-		return nil
-	}
-	if adminLogin == "" || adminPassword == "" {
+	if (adminLogin == "") != (adminPassword == "") {
 		return errors.New("BOOTSTRAP_ADMIN_LOGIN and BOOTSTRAP_ADMIN_PASSWORD must be set together")
 	}
-	if _, found, err := s.store.internalAccountByLogin(ctx, adminLogin); err != nil {
-		return err
-	} else if found {
-		return nil
+	if adminLogin != "" {
+		if _, found, err := s.store.internalAccountByLogin(ctx, adminLogin); err != nil {
+			return err
+		} else if !found {
+			if _, err := s.createInternalAccount(ctx, internalAccountInput{LoginID: adminLogin, Password: adminPassword, Role: roleAdmin, DisplayName: "Bootstrap Admin", ForcePasswordChange: true, CreatedBy: "bootstrap"}); err != nil {
+				return err
+			}
+		}
 	}
-	_, err := s.createInternalAccount(ctx, internalAccountInput{LoginID: adminLogin, Password: adminPassword, Role: roleAdmin, DisplayName: "Bootstrap Admin", ForcePasswordChange: true, CreatedBy: "bootstrap"})
-	return err
+	return nil
 }
 
 func (s *server) createInternalAccount(ctx context.Context, input internalAccountInput) (internalAccount, error) {
 	return s.adminAccounts().Create(ctx, input)
+}
+
+func (s *server) ensureTeacherCustomerProfile(ctx context.Context, user authUser) error {
+	user.Name = envDefault(user.Name, user.Login)
+	_, err := s.store.saveCustomerProfile(ctx, user, map[string]any{
+		"name":       user.Name,
+		"schoolName": "대마고등학교",
+		"studentNo":  teacherStudentNo(user.ID),
+	})
+	return err
 }
 
 func (s *server) sessionFromRequest(r *http.Request) (authSession, bool) {
@@ -435,9 +475,15 @@ func (s *server) authzMiddleware(next http.Handler) http.Handler {
 			}
 			r = r.WithContext(contextWithAuthSession(r.Context(), session))
 		case strings.HasPrefix(path, "/api/customer/"):
-			session, ok := s.requireRole(w, r, roleCustomer)
+			session, ok := s.requireAnyRole(w, r, roleCustomer, roleTeacher)
 			if !ok {
 				return
+			}
+			if sessionHasRole(session, roleTeacher) {
+				if err := s.ensureTeacherCustomerProfile(r.Context(), session.User); err != nil {
+					s.fail(w, r, http.StatusInternalServerError, "DATABASE_WRITE_FAILED", "교사용 테스트 고객 프로필을 저장하지 못했습니다.", map[string]any{"cause": err.Error()})
+					return
+				}
 			}
 			r = r.WithContext(contextWithAuthSession(r.Context(), session))
 		case path == "/api/files/uploads":
@@ -524,7 +570,11 @@ func (s *server) requireAnyRole(w http.ResponseWriter, r *http.Request, roles ..
 }
 
 func sessionHasRole(session authSession, role string) bool {
-	for _, item := range session.User.Roles {
+	return authUserHasRole(session.User, role)
+}
+
+func authUserHasRole(user authUser, role string) bool {
+	for _, item := range user.Roles {
 		if item == role {
 			return true
 		}
@@ -539,6 +589,8 @@ func normalizeInternalRole(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case roleAdmin:
 		return roleAdmin
+	case roleTeacher:
+		return roleTeacher
 	case roleBooth, "seller", "booth_owner", "booth_staff":
 		return roleBooth
 	default:
@@ -594,6 +646,12 @@ func internalAccountID(loginID string) string {
 	normalized := strings.ToLower(strings.TrimSpace(loginID))
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_", "@", "_at_", ".", "_")
 	return "account-" + replacer.Replace(normalized)
+}
+
+func teacherStudentNo(accountID string) string {
+	sum := sha256.Sum256([]byte("teacher-customer:" + accountID))
+	value := int64(sum[0])<<32 | int64(sum[1])<<24 | int64(sum[2])<<16 | int64(sum[3])<<8 | int64(sum[4])
+	return fmt.Sprintf("9%011d", value%100_000_000_000)
 }
 
 func hashPassword(password string) (string, error) {

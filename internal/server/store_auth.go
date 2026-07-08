@@ -24,7 +24,7 @@ func (s *postgresStore) saveSession(ctx context.Context, session authSession) er
 
 	principalType := "customer"
 	var internalAccountID any
-	if session.User.Provider == "internal" || session.Role == roleAdmin || session.Role == roleBooth {
+	if session.User.Provider == "internal" || session.Role == roleAdmin || session.Role == roleBooth || session.Role == roleTeacher {
 		principalType = "internal_account"
 		internalAccountID = session.User.ID
 	}
@@ -146,7 +146,7 @@ func (s *postgresStore) internalAccounts(ctx context.Context, limit int) ([]inte
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, login_id, password_hash, role, status, display_name, force_password_change,
-	created_by, last_login_at, created_at, updated_at
+	booth_id, created_by, last_login_at, created_at, updated_at
 FROM internal_accounts
 ORDER BY created_at DESC, id ASC
 LIMIT $1`, limit)
@@ -169,7 +169,7 @@ LIMIT $1`, limit)
 func (s *postgresStore) internalAccount(ctx context.Context, id string) (internalAccount, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, login_id, password_hash, role, status, display_name, force_password_change,
-	created_by, last_login_at, created_at, updated_at
+	booth_id, created_by, last_login_at, created_at, updated_at
 FROM internal_accounts
 WHERE id = $1`, id)
 	account, err := scanInternalAccount(row)
@@ -189,7 +189,7 @@ func (s *postgresStore) internalAccountByLogin(ctx context.Context, loginID stri
 	}
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, login_id, password_hash, role, status, display_name, force_password_change,
-	created_by, last_login_at, created_at, updated_at
+	booth_id, created_by, last_login_at, created_at, updated_at
 FROM internal_accounts
 WHERE lower(login_id) = $1`, loginID)
 	account, err := scanInternalAccount(row)
@@ -215,10 +215,10 @@ func (s *postgresStore) saveInternalAccount(ctx context.Context, account interna
 	err := s.db.QueryRowContext(ctx, `
 INSERT INTO internal_accounts (
 	id, login_id, password_hash, role, status, display_name, force_password_change,
-	created_by, last_login_at, created_at, updated_at
+	booth_id, created_by, last_login_at, created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, NULLIF($6, ''), $7,
-	NULLIF($8, ''), NULLIF($9, '')::timestamptz, $10, $11
+	NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, '')::timestamptz, $11, $12
 )
 ON CONFLICT (id) DO UPDATE SET
 	login_id = EXCLUDED.login_id,
@@ -227,6 +227,7 @@ ON CONFLICT (id) DO UPDATE SET
 	status = EXCLUDED.status,
 	display_name = EXCLUDED.display_name,
 	force_password_change = EXCLUDED.force_password_change,
+	booth_id = EXCLUDED.booth_id,
 	created_by = COALESCE(internal_accounts.created_by, EXCLUDED.created_by),
 	last_login_at = EXCLUDED.last_login_at,
 	updated_at = EXCLUDED.updated_at
@@ -238,6 +239,7 @@ RETURNING xmax = 0`,
 		account.Status,
 		account.DisplayName,
 		account.ForcePasswordChange,
+		account.BoothID,
 		account.CreatedBy,
 		account.LastLoginAt,
 		account.CreatedAt,
@@ -256,6 +258,7 @@ type internalAccountScanner interface {
 func scanInternalAccount(scanner internalAccountScanner) (internalAccount, error) {
 	var account internalAccount
 	var displayName sql.NullString
+	var boothID sql.NullString
 	var createdBy sql.NullString
 	var lastLoginAt sql.NullTime
 	var createdAt time.Time
@@ -269,6 +272,7 @@ func scanInternalAccount(scanner internalAccountScanner) (internalAccount, error
 		&account.Status,
 		&displayName,
 		&account.ForcePasswordChange,
+		&boothID,
 		&createdBy,
 		&lastLoginAt,
 		&createdAt,
@@ -278,6 +282,7 @@ func scanInternalAccount(scanner internalAccountScanner) (internalAccount, error
 	}
 
 	account.DisplayName = displayName.String
+	account.BoothID = boothID.String
 	account.CreatedBy = createdBy.String
 	if lastLoginAt.Valid {
 		account.LastLoginAt = lastLoginAt.Time.UTC().Format(time.RFC3339)

@@ -15,6 +15,7 @@ func (s *server) routes() http.Handler {
 	routes.public("GET /api/auth/me", s.handleAuthMe)
 	routes.public("PUT /api/auth/me/student-profile", s.handleStudentProfile)
 	routes.public("POST /api/auth/admin/login", s.handleAdminLogin)
+	routes.public("POST /api/auth/teacher/login", s.handleTeacherLogin)
 	routes.public("POST /api/auth/logout", s.handleAuthLogout)
 	routes.public("GET /api/github/app/setup", s.handleGitHubAppSetup)
 	routes.public("POST /api/github/webhooks", s.handleGitHubWebhook)
@@ -103,8 +104,6 @@ func (s *server) routes() http.Handler {
 	routes.seller("POST /api/seller/products/{productId}/images", s.handleSellerProductImageCreate)
 	routes.seller("GET /api/seller/products/{productId}/inventory", s.handleInventory)
 	routes.seller("POST /api/seller/products/{productId}/inventory/adjustments", s.handleInventoryAdjustmentCreate)
-	routes.seller("GET /api/seller/products/{productId}/purchase-limits", s.handlePurchaseLimits)
-	routes.seller("PATCH /api/seller/products/{productId}/purchase-limits", s.handlePurchaseLimits)
 	routes.seller("GET /api/seller/booths/{boothId}/orders", s.handleSellerOrders)
 	routes.seller("GET /api/seller/orders/{orderId}", s.handleOrderDetail)
 	routes.seller("PATCH /api/seller/orders/{orderId}/status", s.handleSellerOrderStatus)
@@ -195,7 +194,7 @@ func (r routeRegistrar) public(pattern string, handler http.HandlerFunc) {
 }
 
 func (r routeRegistrar) customer(pattern string, handler http.HandlerFunc) {
-	r.mux.HandleFunc(pattern, r.s.requireRouteRole(roleCustomer, handler))
+	r.mux.HandleFunc(pattern, r.s.requireAnyRouteRole(handler, roleCustomer, roleTeacher))
 }
 
 func (r routeRegistrar) seller(pattern string, handler http.HandlerFunc) {

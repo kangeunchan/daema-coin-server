@@ -60,9 +60,13 @@ func (svc predictionService) Create(ctx context.Context, user authUser, matchID 
 	if matchStatusKnown && match.Status != "scheduled" {
 		return predictionCreateResult{StakeAmount: req.StakeAmount}, errPredictionClosed
 	}
-	pointBalance, err := svc.wallet.walletBalance(ctx, user.ID, predictionCurrency)
-	if err != nil {
-		return predictionCreateResult{StakeAmount: req.StakeAmount}, err
+	pointBalance := teacherInfiniteWalletBalance
+	if !authUserHasRole(user, roleTeacher) {
+		var err error
+		pointBalance, err = svc.wallet.walletBalance(ctx, user.ID, predictionCurrency)
+		if err != nil {
+			return predictionCreateResult{StakeAmount: req.StakeAmount}, err
+		}
 	}
 	if pointBalance < req.StakeAmount {
 		return predictionCreateResult{StakeAmount: req.StakeAmount}, errPredictionInsufficientFund

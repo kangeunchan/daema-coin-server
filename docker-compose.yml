@@ -31,6 +31,28 @@ services:
       timeout: 3s
       retries: 10
 
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    container_name: daema-coin-seaweedfs
+    restart: unless-stopped
+    command:
+      - server
+      - -dir=/data
+      - -master.port=9333
+      - -volume.port=8081
+      - -volume.publicUrl=localhost:8081
+    ports:
+      - "9333:9333"
+      - "8081:8081"
+    volumes:
+      - daema_coin_seaweedfs_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://$(hostname -i):9333/cluster/status >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   daema_coin_postgres_data:
   daema_coin_redis_data:
+  daema_coin_seaweedfs_data:

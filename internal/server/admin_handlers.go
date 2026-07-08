@@ -363,10 +363,6 @@ func (s *server) handleAdminNotificationSend(w http.ResponseWriter, r *http.Requ
 	s.handleAdminResourceCreate(w, r, resourceNotifications, s.adminResources().CreateNotification)
 }
 
-func (s *server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
-	s.handleAdminResourceCreate(w, r, resourceUploads, s.adminResources().CreateUpload)
-}
-
 func (s *server) handleAdminWorldcupTeams(w http.ResponseWriter, r *http.Request) {
 	seen := map[string]worldcupTeam{}
 	matches, err := s.worldcupMatches(r.Context())

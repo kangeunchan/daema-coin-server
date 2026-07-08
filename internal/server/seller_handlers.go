@@ -24,7 +24,32 @@ func (s *server) handleSellerMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleSellerBooths(w http.ResponseWriter, r *http.Request) {
-	s.respondResourceList(w, r, resourceBooths, 100, resourceFilter{Field: "sellerId", Value: s.currentUserID(r)})
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		s.fail(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "부스 계정 로그인이 필요합니다.", nil)
+		return
+	}
+	boothID := strings.TrimSpace(session.User.BoothID)
+	if boothID == "" {
+		s.okPage(w, r, []map[string]any{}, &pagination{Limit: 100, HasMore: false})
+		return
+	}
+	item, found, err := s.store.get(r.Context(), resourceBooths, boothID)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "부스를 읽지 못했습니다.", map[string]any{"boothId": boothID, "cause": err.Error()})
+		return
+	}
+	if found {
+		s.okPage(w, r, []map[string]any{item}, &pagination{Limit: 100, HasMore: false})
+		return
+	}
+	s.okPage(w, r, []map[string]any{{
+		"id":       boothID,
+		"boothId":  boothID,
+		"name":     envDefault(session.User.Name, boothID),
+		"sellerId": session.User.ID,
+		"status":   "active",
+	}}, &pagination{Limit: 100, HasMore: false})
 }
 
 func (s *server) handleSellerBooth(w http.ResponseWriter, r *http.Request) {
@@ -194,51 +219,6 @@ func (s *server) handleInventoryAdjustmentCreate(w http.ResponseWriter, r *http.
 		return
 	}
 	s.created(w, r, item)
-}
-
-func (s *server) handlePurchaseLimits(w http.ResponseWriter, r *http.Request) {
-	productID := r.PathValue("productId")
-	session, ok := s.sessionFromRequest(r)
-	if !ok {
-		s.fail(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "부스 계정 로그인이 필요합니다.", nil)
-		return
-	}
-	product, found, err := s.store.get(r.Context(), resourceProducts, productID)
-	if err != nil {
-		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "상품을 읽지 못했습니다.", map[string]any{"productId": productID, "cause": err.Error()})
-		return
-	}
-	if !found {
-		s.fail(w, r, http.StatusNotFound, "PRODUCT_NOT_FOUND", "상품을 찾을 수 없습니다.", map[string]any{"productId": productID})
-		return
-	}
-	if !resourceBelongsToBooth(product, session.User.BoothID) {
-		s.fail(w, r, http.StatusForbidden, "BOOTH_SCOPE_REQUIRED", "해당 상품에 접근할 권한이 없습니다.", map[string]any{"productId": productID})
-		return
-	}
-	if r.Method == http.MethodPatch {
-		body, ok := s.requestMap(w, r)
-		if !ok {
-			return
-		}
-		item, err := s.sellers().PutPurchaseLimit(r.Context(), productID, body)
-		if err != nil {
-			s.failResourceCommand(w, r, resourcePurchaseLimits, productID, "create", err)
-			return
-		}
-		s.ok(w, r, item)
-		return
-	}
-	item, found, err := s.store.get(r.Context(), resourcePurchaseLimits, productID)
-	if err != nil {
-		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "구매 제한을 읽지 못했습니다.", map[string]any{"productId": productID, "cause": err.Error()})
-		return
-	}
-	if !found {
-		s.ok(w, r, nil)
-		return
-	}
-	s.ok(w, r, item)
 }
 
 func (s *server) handleSellerOrders(w http.ResponseWriter, r *http.Request) {

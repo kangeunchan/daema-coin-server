@@ -49,10 +49,6 @@ func (svc sellerService) CreateInventoryAdjustment(ctx context.Context, productI
 	return svc.resources.Create(ctx, createResourceCommand{Resource: resourceInventory, Prefix: "inventory", Body: body, Extras: map[string]any{"productId": productID}, IDCandidates: []string{"adjustmentId", "inventoryId"}})
 }
 
-func (svc sellerService) PutPurchaseLimit(ctx context.Context, productID string, body map[string]any) (map[string]any, error) {
-	return svc.resources.Put(ctx, patchResourceCommand{Resource: resourcePurchaseLimits, ID: productID, Body: body, Extras: map[string]any{"productId": productID}})
-}
-
 func (svc sellerService) UpdateOrderAction(ctx context.Context, orderID string, body, extras map[string]any) (map[string]any, error) {
 	return svc.resources.Patch(ctx, patchResourceCommand{Resource: resourceOrders, ID: orderID, Body: body, Extras: extras})
 }

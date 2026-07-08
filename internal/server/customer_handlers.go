@@ -2,13 +2,20 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
-const excludedUserRankingGitHubLogin = "kangeunchan"
+const (
+	teacherInfiniteWalletBalance   = 999_999_999
+	excludedUserRankingGitHubLogin = "kangeunchan"
+)
+
+var boothRankingsLaunchAtKST = time.Date(2026, time.July, 8, 0, 0, 0, 0, time.FixedZone("KST", 9*60*60))
 
 func (s *server) walletBalance(ctx context.Context, userID, currency string) (int, error) {
 	return s.store.walletBalance(ctx, userID, currency)
@@ -100,7 +107,7 @@ func (s *server) handleHome(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	wallet, err := s.store.walletBalances(r.Context(), s.currentUserID(r), 20)
+	wallet, err := s.customerWalletBalances(r, 20)
 	if err != nil {
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "지갑 잔액을 읽지 못했습니다.", map[string]any{"cause": err.Error()})
 		return
@@ -122,9 +129,13 @@ func (s *server) handleHome(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	boothRanking, _, ok := s.listResources(w, r, resourceBoothRankings, 10)
-	if !ok {
-		return
+	boothRanking := []map[string]any{}
+	if boothRankingsVisibleNow() {
+		var ok bool
+		boothRanking, _, ok = s.listResources(w, r, resourceBoothRankings, 10)
+		if !ok {
+			return
+		}
 	}
 	banners, _, ok := s.listResources(w, r, resourceFestivalBanners, 10)
 	if !ok {
@@ -150,12 +161,39 @@ func (s *server) handleNoticeHighlight(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleWalletBalances(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.walletBalances(r.Context(), s.currentUserID(r), queryInt(r, "limit", 20))
+	items, err := s.customerWalletBalances(r, queryInt(r, "limit", 20))
 	if err != nil {
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "지갑 잔액을 읽지 못했습니다.", map[string]any{"cause": err.Error()})
 		return
 	}
 	s.ok(w, r, map[string]any{"balances": items})
+}
+
+func (s *server) customerWalletBalances(r *http.Request, limit int) ([]map[string]any, error) {
+	if session, ok := s.sessionFromRequest(r); ok && sessionHasRole(session, roleTeacher) {
+		return infiniteTeacherWalletBalances(session.User.ID), nil
+	}
+	return s.store.walletBalances(r.Context(), s.currentUserID(r), limit)
+}
+
+func infiniteTeacherWalletBalances(userID string) []map[string]any {
+	return []map[string]any{
+		infiniteTeacherWalletBalance(userID, "DMC"),
+		infiniteTeacherWalletBalance(userID, "POINT"),
+	}
+}
+
+func infiniteTeacherWalletBalance(userID, currency string) map[string]any {
+	return map[string]any{
+		"id":       walletBalanceID(userID, currency),
+		"userId":   userID,
+		"currency": currency,
+		"label":    walletCurrencyLabel(currency),
+		"name":     walletCurrencyLabel(currency),
+		"balance":  teacherInfiniteWalletBalance,
+		"amount":   amount(currency, teacherInfiniteWalletBalance),
+		"infinite": true,
+	}
 }
 
 func (s *server) handleInterestBenefit(w http.ResponseWriter, r *http.Request) {
@@ -199,6 +237,10 @@ func (s *server) handleLedgerRecent(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleRankings(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Query().Get("type") {
 	case "booth":
+		if !boothRankingsVisibleNow() {
+			s.okPage(w, r, []map[string]any{}, &pagination{Limit: 20, HasMore: false})
+			return
+		}
 		s.respondResourceList(w, r, resourceBoothRankings, 20)
 	case "user":
 		rankings, err := s.userPointRankings(r.Context(), 20)
@@ -229,9 +271,13 @@ func (s *server) handleRankings(w http.ResponseWriter, r *http.Request) {
 			}
 			users = filterUserRankings(users, 20)
 		}
-		booths, _, ok := s.listResources(w, r, resourceBoothRankings, 20)
-		if !ok {
-			return
+		booths := []map[string]any{}
+		if boothRankingsVisibleNow() {
+			var ok bool
+			booths, _, ok = s.listResources(w, r, resourceBoothRankings, 20)
+			if !ok {
+				return
+			}
 		}
 		s.ok(w, r, map[string]any{"userPoint": users, "boothPoint": booths})
 	}
@@ -243,6 +289,10 @@ func (s *server) userPointRankings(ctx context.Context, limit int) ([]map[string
 		return nil, err
 	}
 	profiles, err := s.store.customerProfiles(ctx, 10000)
+	if err != nil {
+		return nil, err
+	}
+	excludedUserIDs, err := s.excludedUserRankingAccountIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -261,6 +311,9 @@ func (s *server) userPointRankings(ctx context.Context, limit int) ([]map[string
 		}
 		userID := stringValue(wallet["userId"])
 		if userID == "" {
+			continue
+		}
+		if excludedUserIDs[userID] {
 			continue
 		}
 		points := amountValue(wallet)
@@ -296,9 +349,35 @@ func (s *server) userPointRankings(ctx context.Context, limit int) ([]map[string
 	return filterUserRankings(items, limit), nil
 }
 
+func (s *server) excludedUserRankingAccountIDs(ctx context.Context) (map[string]bool, error) {
+	accounts, err := s.store.internalAccounts(ctx, 10000)
+	if err != nil {
+		return nil, err
+	}
+	excluded := map[string]bool{}
+	for _, account := range accounts {
+		switch normalizeInternalRole(account.Role) {
+		case roleBooth, roleTeacher:
+			excluded[account.ID] = true
+		}
+	}
+	return excluded, nil
+}
+
+func boothRankingsVisibleNow() bool {
+	return !time.Now().Before(boothRankingsLaunchAtKST)
+}
+
 func filterUserRankings(items []map[string]any, limit int) []map[string]any {
+	return filterUserRankingsByUserIDs(items, limit, nil)
+}
+
+func filterUserRankingsByUserIDs(items []map[string]any, limit int, excludedUserIDs map[string]bool) []map[string]any {
 	filtered := make([]map[string]any, 0, len(items))
 	for _, item := range items {
+		if excludedUserIDs[stringValue(item["userId"])] {
+			continue
+		}
 		login := firstNonEmpty(stringValue(item["githubLogin"]), stringValue(item["login"]))
 		if strings.EqualFold(strings.TrimSpace(login), excludedUserRankingGitHubLogin) {
 			continue
@@ -424,6 +503,10 @@ func (s *server) handleBoothCheckIn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleBoothRankings(w http.ResponseWriter, r *http.Request) {
+	if !boothRankingsVisibleNow() {
+		s.okPage(w, r, []map[string]any{}, &pagination{Limit: 20, HasMore: false})
+		return
+	}
 	s.respondResourceList(w, r, resourceBoothRankings, 20)
 }
 
@@ -502,7 +585,12 @@ func (s *server) handleOrderCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := s.customers().CreateOrder(r.Context(), s.currentUserID(r), body)
+	session, ok := s.sessionFromRequest(r)
+	if !ok {
+		s.fail(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "로그인이 필요합니다.", nil)
+		return
+	}
+	item, err := s.createPaidCustomerOrder(r.Context(), session.User, body)
 	if err != nil {
 		if s.failCustomerMutationValidation(w, r, err, body) {
 			return
@@ -511,6 +599,139 @@ func (s *server) handleOrderCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.created(w, r, item)
+}
+
+func (s *server) createPaidCustomerOrder(ctx context.Context, user authUser, body map[string]any) (map[string]any, error) {
+	productID := strings.TrimSpace(stringValue(body["productId"]))
+	if productID == "" {
+		return nil, errCustomerProductRequired
+	}
+	if !optionalPositiveQuantity(body) {
+		return nil, errCustomerQuantityInvalid
+	}
+	quantity := 1
+	if n, ok := numericValue(body["quantity"]); ok {
+		quantity = int(n)
+	}
+
+	orderID := firstNonEmpty(stringValue(body["orderId"]), resourceID(body, "order", "orderId"))
+	var order map[string]any
+	err := s.store.withSerializableTx(ctx, func(tx *sql.Tx) error {
+		product, found, err := s.store.getResourceTx(ctx, tx, resourceProducts, productID, true)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errCustomerProductNotFound
+		}
+		status := strings.ToLower(strings.TrimSpace(stringValue(product["status"])))
+		if status != "" && status != "active" && status != "판매 중" {
+			return errCustomerProductClosed
+		}
+		stock, hasStock := numericValue(firstNonEmptyAny(product["stock"], product["stockQuantity"]))
+		if hasStock && int(stock) < quantity {
+			return errCustomerStockShortage
+		}
+
+		unitAmount := productUnitAmount(product)
+		if unitAmount <= 0 {
+			return errCustomerProductClosed
+		}
+		totalAmount := unitAmount * quantity
+		now := time.Now().UTC().Format(time.RFC3339)
+		productName := firstNonEmpty(stringValue(product["title"]), stringValue(product["name"]), productID)
+		boothID := stringValue(product["boothId"])
+
+		orderPayload := cloneMap(body)
+		orderPayload["productId"] = productID
+		orderPayload["productName"] = productName
+		orderPayload["item"] = productName
+		orderPayload["items"] = []map[string]any{{"productId": productID, "name": productName, "quantity": quantity, "unitAmount": amount("DMC", unitAmount)}}
+		orderPayload["quantity"] = quantity
+		orderPayload["boothId"] = boothID
+		orderPayload["customerId"] = user.ID
+		orderPayload["userId"] = user.ID
+		orderPayload["customerName"] = firstNonEmpty(user.Name, user.Login, user.ID)
+		orderPayload["name"] = firstNonEmpty(user.Name, user.Login, user.ID)
+		orderPayload["currency"] = "DMC"
+		orderPayload["unitAmount"] = amount("DMC", unitAmount)
+		orderPayload["totalAmount"] = amount("DMC", totalAmount)
+		orderPayload["amount"] = amount("DMC", totalAmount)
+		orderPayload["status"] = "paid"
+		orderPayload["paidAt"] = now
+
+		createdOrder, created, err := s.store.createResourceTx(ctx, tx, resourceOrders, orderID, orderPayload)
+		if err != nil {
+			return err
+		}
+		if !created {
+			existing, found, err := s.store.getResourceTx(ctx, tx, resourceOrders, orderID, true)
+			if err != nil {
+				return err
+			}
+			if !found || stringValue(existing["userId"]) != user.ID || stringValue(existing["productId"]) != productID {
+				return errLedgerIdempotencyConflict
+			}
+			order = existing
+			return nil
+		}
+
+		ledgerExtras := map[string]any{
+			"orderId":       orderID,
+			"productId":     productID,
+			"boothId":       boothID,
+			"referenceType": "order",
+			"referenceId":   orderID,
+			"description":   "부스 상품 구매",
+		}
+		if _, err := s.store.createLedgerAndAdjustWalletRequestTx(ctx, tx, newWalletLedgerRequest(user, ledgerID("booth-order", orderID), "booth-order", "expense", "DMC", totalAmount, ledgerExtras)); err != nil {
+			return err
+		}
+
+		if hasStock {
+			nextStock := int(stock) - quantity
+			product["stock"] = nextStock
+			product["stockQuantity"] = nextStock
+			if nextStock <= 0 {
+				product["status"] = "sold_out"
+			}
+			if _, err := s.store.putResourceTx(ctx, tx, resourceProducts, productID, product); err != nil {
+				return err
+			}
+		}
+
+		order = createdOrder
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return order, nil
+}
+
+func productUnitAmount(product map[string]any) int {
+	for _, field := range []string{"salePrice", "price", "amount", "unitAmount"} {
+		if value, ok := product[field]; ok {
+			if amountMap, ok := value.(map[string]any); ok {
+				if n, ok := numericValue(amountMap["value"]); ok {
+					return int(n)
+				}
+			}
+			if n, ok := numericValue(value); ok {
+				return int(n)
+			}
+		}
+	}
+	return 0
+}
+
+func firstNonEmptyAny(values ...any) any {
+	for _, value := range values {
+		if stringValue(value) != "" {
+			return value
+		}
+	}
+	return nil
 }
 
 func (s *server) handleOrderDetail(w http.ResponseWriter, r *http.Request) {
@@ -606,6 +827,14 @@ func (s *server) failCustomerMutationValidation(w http.ResponseWriter, r *http.R
 		s.fail(w, r, http.StatusBadRequest, "ORDER_ITEMS_REQUIRED", "productId 또는 주문 상품 목록이 필요합니다.", nil)
 	case errors.Is(err, errCustomerQuantityInvalid):
 		s.fail(w, r, http.StatusBadRequest, "INVALID_QUANTITY", "quantity는 1 이상의 정수여야 합니다.", map[string]any{"quantity": body["quantity"]})
+	case errors.Is(err, errCustomerProductNotFound):
+		s.fail(w, r, http.StatusNotFound, "PRODUCT_NOT_FOUND", "상품을 찾을 수 없습니다.", map[string]any{"productId": body["productId"]})
+	case errors.Is(err, errCustomerProductClosed):
+		s.fail(w, r, http.StatusBadRequest, "PRODUCT_NOT_AVAILABLE", "구매할 수 없는 상품입니다.", map[string]any{"productId": body["productId"]})
+	case errors.Is(err, errCustomerStockShortage):
+		s.fail(w, r, http.StatusConflict, "PRODUCT_STOCK_SHORTAGE", "상품 재고가 부족합니다.", map[string]any{"productId": body["productId"]})
+	case errors.Is(err, errInsufficientWalletBalance):
+		s.fail(w, r, http.StatusPaymentRequired, "INSUFFICIENT_BALANCE", "DMC 잔액이 부족합니다.", nil)
 	default:
 		return false
 	}

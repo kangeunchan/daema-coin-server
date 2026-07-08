@@ -265,6 +265,17 @@ RETURNING id`,
 		return false, err
 	}
 
+	if authUserHasRole(user, roleTeacher) && direction == "expense" {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE wallet_accounts
+SET balance = GREATEST(balance, $2),
+	version = version + 1,
+	updated_at = now()
+WHERE id = $1`, walletID, teacherInfiniteWalletBalance); err != nil {
+			return false, err
+		}
+	}
+
 	var nextBalance int
 	err = tx.QueryRowContext(ctx, `
 UPDATE wallet_accounts
