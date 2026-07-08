@@ -161,6 +161,13 @@ func (s *server) handleSellerProduct(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusForbidden, "BOOTH_SCOPE_REQUIRED", "해당 상품에 접근할 권한이 없습니다.", map[string]any{"productId": productID})
 		return
 	}
+	if r.Method == http.MethodDelete {
+		if !s.deleteResource(w, r, resourceProducts, productID) {
+			return
+		}
+		s.ok(w, r, map[string]any{"deleted": true, "productId": productID})
+		return
+	}
 	if r.Method == http.MethodPatch {
 		body, ok := s.requestMap(w, r)
 		if !ok {

@@ -101,6 +101,7 @@ func (s *server) routes() http.Handler {
 	routes.seller("POST /api/seller/booths/{boothId}/products", s.handleSellerProductCreate)
 	routes.seller("GET /api/seller/products/{productId}", s.handleSellerProduct)
 	routes.seller("PATCH /api/seller/products/{productId}", s.handleSellerProduct)
+	routes.seller("DELETE /api/seller/products/{productId}", s.handleSellerProduct)
 	routes.seller("PATCH /api/seller/products/{productId}/status", s.handleSellerProductStatus)
 	routes.seller("POST /api/seller/products/{productId}/images", s.handleSellerProductImageCreate)
 	routes.seller("GET /api/seller/products/{productId}/inventory", s.handleInventory)
