@@ -449,7 +449,7 @@ func (s *server) handleBoothHome(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	products, _, ok := s.listResources(w, r, resourceProducts, 50)
+	products, _, ok := s.listResources(w, r, resourceProducts, 1000)
 	if !ok {
 		return
 	}
@@ -469,7 +469,7 @@ func (s *server) handleBoothHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleBoothProducts(w http.ResponseWriter, r *http.Request) {
-	items, limit, ok := s.listResources(w, r, resourceProducts, 100,
+	items, limit, ok := s.listResources(w, r, resourceProducts, 1000,
 		resourceFilter{Field: "boothId", Value: r.PathValue("boothId")},
 		resourceFilter{Field: "categoryId", Value: r.URL.Query().Get("categoryId")},
 		resourceFilter{Field: "status", Value: r.URL.Query().Get("status")},
