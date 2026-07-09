@@ -52,6 +52,9 @@ func Run(ctx context.Context) error {
 	if envBool("PREDICTION_SETTLEMENT_WORKER_ENABLED", true) {
 		go s.runPredictionSettlementWorker(ctx, envDuration("PREDICTION_SETTLEMENT_INTERVAL", time.Minute))
 	}
+	if envBool("POINT_CONVERSION_WORKER_ENABLED", true) {
+		go s.runPointConversionWorker(ctx, envDuration("POINT_CONVERSION_INTERVAL", time.Minute))
+	}
 
 	port := env("PORT", "8080")
 	addr := ":" + port

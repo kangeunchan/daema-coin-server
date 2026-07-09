@@ -53,6 +53,9 @@ func (svc predictionService) Create(ctx context.Context, user authUser, matchID 
 	if err != nil {
 		return predictionCreateResult{}, errPredictionInvalidInput
 	}
+	if !worldcupPredictionOpenAt(time.Now()) {
+		return predictionCreateResult{StakeAmount: req.StakeAmount}, errPredictionClosed
+	}
 	match, matchStatusKnown, err := svc.matches.worldcupMatchByID(ctx, matchID)
 	if err != nil {
 		return predictionCreateResult{}, err
@@ -87,6 +90,9 @@ type predictionCancelResult struct {
 }
 
 func (svc predictionService) Cancel(ctx context.Context, user authUser, matchID string) (predictionCancelResult, error) {
+	if !worldcupPredictionOpenAt(time.Now()) {
+		return predictionCancelResult{}, errPredictionCancelClosed
+	}
 	match, matchStatusKnown, err := svc.matches.worldcupMatchByID(ctx, matchID)
 	if err != nil {
 		return predictionCancelResult{}, err

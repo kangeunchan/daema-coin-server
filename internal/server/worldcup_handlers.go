@@ -31,6 +31,10 @@ type worldcupMatch struct {
 }
 
 func (s *server) handleWorldcupMatchDays(w http.ResponseWriter, r *http.Request) {
+	if !worldcupScheduleVisibleAt(time.Now()) {
+		s.ok(w, r, []map[string]any{})
+		return
+	}
 	matches, err := s.worldcupMatches(r.Context())
 	if err != nil {
 		s.failFootball(w, r, err)
@@ -40,6 +44,10 @@ func (s *server) handleWorldcupMatchDays(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *server) handleWorldcupMatches(w http.ResponseWriter, r *http.Request) {
+	if !worldcupScheduleVisibleAt(time.Now()) {
+		s.ok(w, r, []worldcupMatch{})
+		return
+	}
 	matches, err := s.worldcupMatches(r.Context())
 	if err != nil {
 		s.failFootball(w, r, err)

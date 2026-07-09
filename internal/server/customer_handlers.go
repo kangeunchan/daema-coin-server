@@ -625,7 +625,40 @@ func (s *server) handleCartItem(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := s.customers().CreateCartItem(r.Context(), s.currentUserID(r), body)
+	productID := strings.TrimSpace(stringValue(body["productId"]))
+	if productID == "" {
+		s.fail(w, r, http.StatusBadRequest, "PRODUCT_ID_REQUIRED", "productId가 필요합니다.", nil)
+		return
+	}
+	if !optionalPositiveQuantity(body) {
+		s.fail(w, r, http.StatusBadRequest, "INVALID_QUANTITY", "quantity는 1 이상의 정수여야 합니다.", map[string]any{"quantity": body["quantity"]})
+		return
+	}
+	product, found, err := s.store.get(r.Context(), resourceProducts, productID)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "상품을 읽지 못했습니다.", map[string]any{"productId": productID, "cause": err.Error()})
+		return
+	}
+	if !found {
+		s.fail(w, r, http.StatusNotFound, "PRODUCT_NOT_FOUND", "상품을 찾을 수 없습니다.", map[string]any{"productId": productID})
+		return
+	}
+	userID := s.currentUserID(r)
+	quantity := 1
+	if n, ok := numericValue(body["quantity"]); ok {
+		quantity = int(n)
+	}
+	body["cartItemId"] = firstNonEmpty(stringValue(body["cartItemId"]), ledgerID("cart-item", userID, productID))
+	body["productId"] = productID
+	body["quantity"] = quantity
+	body["title"] = firstNonEmpty(stringValue(product["title"]), stringValue(product["name"]), productID)
+	body["name"] = body["title"]
+	body["boothId"] = stringValue(product["boothId"])
+	body["imageUrl"] = firstNonEmpty(stringValue(product["imageUrl"]), stringValue(product["imageSrc"]), stringValue(product["thumbnail"]))
+	body["thumbnail"] = body["imageUrl"]
+	body["unitAmount"] = amount("DMC", productUnitAmount(product))
+	body["price"] = body["unitAmount"]
+	item, err := s.customers().CreateCartItem(r.Context(), userID, body)
 	if err != nil {
 		if s.failCustomerMutationValidation(w, r, err, body) {
 			return
@@ -692,6 +725,10 @@ func (s *server) handleOrderCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.created(w, r, item)
+}
+
+func (s *server) handleOrders(w http.ResponseWriter, r *http.Request) {
+	s.respondResourceList(w, r, resourceOrders, 100, resourceFilter{Field: "userId", Value: s.currentUserID(r)})
 }
 
 func (s *server) createPaidCustomerOrder(ctx context.Context, user authUser, body map[string]any) (map[string]any, error) {
@@ -859,12 +896,28 @@ func (s *server) handleFavorite(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := s.customers().CreateFavorite(r.Context(), s.currentUserID(r), body)
+	userID := s.currentUserID(r)
+	targetID := firstNonEmpty(stringValue(body["targetId"]), stringValue(body["productId"]))
+	if targetID == "" {
+		s.fail(w, r, http.StatusBadRequest, "TARGET_ID_REQUIRED", "targetId가 필요합니다.", nil)
+		return
+	}
+	body["favoriteId"] = firstNonEmpty(stringValue(body["favoriteId"]), ledgerID("favorite", userID, targetID))
+	body["targetId"] = targetID
+	body["targetType"] = firstNonEmpty(stringValue(body["targetType"]), "product")
+	item, err := s.customers().CreateFavorite(r.Context(), userID, body)
 	if err != nil {
 		s.failResourceCommand(w, r, resourceFavorites, "", "create", err)
 		return
 	}
 	s.created(w, r, item)
+}
+
+func (s *server) handleFavorites(w http.ResponseWriter, r *http.Request) {
+	s.respondResourceList(w, r, resourceFavorites, 100,
+		resourceFilter{Field: "userId", Value: s.currentUserID(r)},
+		resourceFilter{Field: "targetId", Value: r.URL.Query().Get("targetId")},
+	)
 }
 
 func (s *server) handleFavoriteDelete(w http.ResponseWriter, r *http.Request) {

@@ -34,6 +34,7 @@ func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request)
 			myStakeAmount = predictionStakeAmount(item)
 		}
 	}
+	predictionOpen := worldcupPredictionOpenAt(time.Now())
 	data := map[string]any{
 		"matchId":          matchID,
 		"homePercent":      predictionStakePercent(stakeAmounts["home"], totalStakeAmount),
@@ -41,8 +42,8 @@ func (s *server) handlePredictionSummary(w http.ResponseWriter, r *http.Request)
 		"awayPercent":      predictionStakePercent(stakeAmounts["away"], totalStakeAmount),
 		"totalCount":       total,
 		"totalStakeAmount": totalStakeAmount,
-		"canPredict":       myPrediction == "" && (!matchStatusKnown || match.Status == "scheduled"),
-		"canCancel":        myPrediction != "" && (!matchStatusKnown || match.Status == "scheduled"),
+		"canPredict":       predictionOpen && myPrediction == "" && (!matchStatusKnown || match.Status == "scheduled"),
+		"canCancel":        predictionOpen && myPrediction != "" && (!matchStatusKnown || match.Status == "scheduled"),
 		"myPrediction":     nil,
 		"myStakeAmount":    nil,
 	}

@@ -178,6 +178,11 @@ func (s *postgresStore) createLedgerAndAdjustWalletRequestTx(ctx context.Context
 		extras = map[string]any{}
 	}
 	currency = strings.ToUpper(strings.TrimSpace(currency))
+	if effectiveCurrency, originalCurrency := effectiveWalletCurrencyAt(currency, time.Now()); originalCurrency != "" {
+		currency = effectiveCurrency
+		extras["originalCurrency"] = originalCurrency
+		extras["currencyConvertedBy"] = pointConversionJobID
+	}
 	if currency != "DMC" && currency != "POINT" {
 		return false, fmt.Errorf("unsupported wallet currency %q", currency)
 	}
@@ -328,4 +333,154 @@ FOR UPDATE`, id).Scan(
 		existingType == txType &&
 		existingReferenceType.String == referenceType &&
 		existingReferenceID.String == referenceID, nil
+}
+
+type pointBalanceForConversion struct {
+	WalletID string
+	UserID   string
+	Balance  int
+}
+
+func (s *postgresStore) convertPointBalancesToDMC(ctx context.Context, now time.Time) (map[string]any, error) {
+	summary := map[string]any{}
+	err := s.withSerializableTx(ctx, func(tx *sql.Tx) error {
+		existingRaw := ""
+		err := tx.QueryRowContext(ctx, `
+SELECT payload
+FROM system_job_states
+WHERE id = $1
+FOR UPDATE`, pointConversionJobID).Scan(&existingRaw)
+		if err == nil {
+			_ = json.Unmarshal([]byte(existingRaw), &summary)
+			if stringValue(summary["status"]) == "completed" {
+				summary["alreadyCompleted"] = true
+				return nil
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		rows, err := tx.QueryContext(ctx, `
+SELECT id, customer_id, balance
+FROM wallet_accounts
+WHERE currency = 'POINT'
+	AND balance > 0
+ORDER BY customer_id
+FOR UPDATE`)
+		if err != nil {
+			return err
+		}
+		pointBalances := []pointBalanceForConversion{}
+		for rows.Next() {
+			var item pointBalanceForConversion
+			if err := rows.Scan(&item.WalletID, &item.UserID, &item.Balance); err != nil {
+				rows.Close()
+				return err
+			}
+			pointBalances = append(pointBalances, item)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+
+		convertedAmount := 0
+		convertedCustomers := 0
+		occurredAt := now.UTC()
+		for _, item := range pointBalances {
+			if item.Balance <= 0 {
+				continue
+			}
+
+			dmcWalletID := walletBalanceID(item.UserID, "DMC")
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO wallet_accounts(id, customer_id, currency, balance, version, created_at, updated_at)
+VALUES($1, $2, 'DMC', 0, 0, now(), now())
+ON CONFLICT (customer_id, currency) DO NOTHING`, dmcWalletID, item.UserID); err != nil {
+				return err
+			}
+			if err := tx.QueryRowContext(ctx, `
+SELECT id
+FROM wallet_accounts
+WHERE customer_id = $1 AND currency = 'DMC'
+FOR UPDATE`, item.UserID).Scan(&dmcWalletID); err != nil {
+				return err
+			}
+
+			pointLedgerID := ledgerID(pointConversionJobID, item.UserID, "point-expense")
+			dmcLedgerID := ledgerID(pointConversionJobID, item.UserID, "dmc-income")
+			metadata := map[string]any{
+				"description":   "대마포인트 DMC 전환",
+				"referenceType": "point-conversion",
+				"referenceId":   pointConversionJobID,
+				"convertedAt":   occurredAt.Format(time.RFC3339),
+			}
+			metadataRaw, err := json.Marshal(metadata)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO ledger_transactions (
+	id, wallet_account_id, customer_id, direction, currency, amount, transaction_type,
+	reference_type, reference_id, idempotency_key, description, metadata, occurred_at, created_at
+) VALUES (
+	$1, $2, $3, 'expense', 'POINT', $4, 'point-to-dmc-conversion',
+	'point-conversion', $5, $1, '대마포인트 DMC 전환', $6, $7, now()
+)
+ON CONFLICT (id) DO NOTHING`, pointLedgerID, item.WalletID, item.UserID, item.Balance, pointConversionJobID, string(metadataRaw), occurredAt); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO ledger_transactions (
+	id, wallet_account_id, customer_id, direction, currency, amount, transaction_type,
+	reference_type, reference_id, idempotency_key, description, metadata, occurred_at, created_at
+) VALUES (
+	$1, $2, $3, 'income', 'DMC', $4, 'point-to-dmc-conversion',
+	'point-conversion', $5, $1, '대마포인트 DMC 전환', $6, $7, now()
+)
+ON CONFLICT (id) DO NOTHING`, dmcLedgerID, dmcWalletID, item.UserID, item.Balance, pointConversionJobID, string(metadataRaw), occurredAt); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `
+UPDATE wallet_accounts
+SET balance = 0,
+	version = version + 1,
+	updated_at = now()
+WHERE id = $1`, item.WalletID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `
+UPDATE wallet_accounts
+SET balance = balance + $2,
+	version = version + 1,
+	updated_at = now()
+WHERE id = $1`, dmcWalletID, item.Balance); err != nil {
+				return err
+			}
+			convertedAmount += item.Balance
+			convertedCustomers++
+		}
+
+		summary = map[string]any{
+			"id":                     pointConversionJobID,
+			"name":                   "Point to DMC conversion",
+			"type":                   "worker",
+			"status":                 "completed",
+			"conversionAt":           pointConversionAtKST.Format(time.RFC3339),
+			"convertedAt":            occurredAt.Format(time.RFC3339),
+			"convertedAmount":        convertedAmount,
+			"convertedCustomerCount": convertedCustomers,
+		}
+		raw, err := json.Marshal(summary)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `
+INSERT INTO system_job_states(id, payload, created_at, updated_at)
+VALUES($1, $2, now(), now())
+ON CONFLICT(id) DO UPDATE SET
+	payload = excluded.payload,
+	updated_at = excluded.updated_at`, pointConversionJobID, string(raw))
+		return err
+	})
+	return summary, err
 }
