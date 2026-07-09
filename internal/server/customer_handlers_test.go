@@ -56,3 +56,19 @@ func TestFilterUserRankingsExcludesInternalAccountIDs(t *testing.T) {
 		t.Fatalf("second ranking = %#v, want customer-2 at rank 2", got[1])
 	}
 }
+
+func TestFilterCustomerNotificationsKeepsCurrentUserAndGlobalItems(t *testing.T) {
+	items := []map[string]any{
+		{"id": "global"},
+		{"id": "mine", "userId": "customer-1"},
+		{"id": "other", "customerId": "customer-2"},
+	}
+
+	got := filterCustomerNotifications(items, "customer-1")
+	if len(got) != 2 {
+		t.Fatalf("filterCustomerNotifications returned %d items, want 2", len(got))
+	}
+	if got[0]["id"] != "global" || got[1]["id"] != "mine" {
+		t.Fatalf("filterCustomerNotifications = %#v, want global and customer-1 item", got)
+	}
+}

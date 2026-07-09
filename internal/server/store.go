@@ -456,6 +456,7 @@ var resourceTables = map[string]string{
 	resourceNavigation:            "navigation_items",
 	resourceCustomerProfiles:      "customer_profile_snapshots",
 	resourceNotifications:         "notification_messages",
+	resourcePushTargets:           "push_subscription_targets",
 	resourceSearchSuggestions:     "search_suggestions",
 	resourceSearchDocuments:       "search_documents",
 	resourceNotices:               "notice_posts",

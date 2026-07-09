@@ -29,6 +29,7 @@ const (
 	resourceNavigation            = "navigation"
 	resourceCustomerProfiles      = "customer_profiles"
 	resourceNotifications         = "notifications"
+	resourcePushTargets           = "push_targets"
 	resourceSearchSuggestions     = "search_suggestions"
 	resourceSearchDocuments       = "search_documents"
 	resourceNotices               = "notices"

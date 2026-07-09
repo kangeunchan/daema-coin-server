@@ -75,11 +75,30 @@ func (s *server) handleNavigation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleNotificationSummary(w http.ResponseWriter, r *http.Request) {
-	items, _, ok := s.listResources(w, r, resourceNotifications, 20)
+	items, _, ok := s.listResources(w, r, resourceNotifications, 200)
 	if !ok {
 		return
 	}
+	items = filterCustomerNotifications(items, s.currentUserID(r))
+	if len(items) > 20 {
+		items = items[:20]
+	}
 	s.ok(w, r, map[string]any{"unreadCount": countUnread(items), "latest": firstItem(items)})
+}
+
+func filterCustomerNotifications(items []map[string]any, userID string) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		targetUserID := firstNonEmpty(
+			stringValue(item["userId"]),
+			stringValue(item["customerId"]),
+			stringValue(item["recipientId"]),
+		)
+		if targetUserID == "" || targetUserID == userID {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func (s *server) handleCartSummary(w http.ResponseWriter, r *http.Request) {

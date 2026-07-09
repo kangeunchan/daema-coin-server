@@ -16,6 +16,7 @@ type server struct {
 	store         *postgresStore
 	football      *footballClient
 	footballCache *redisFootballCache
+	fcm           *fcmClient
 	githubAuth    *githubOAuthClient
 }
 
@@ -41,6 +42,7 @@ func Run(ctx context.Context) error {
 		store:         store,
 		football:      newFootballClientFromEnv(),
 		footballCache: footballCache,
+		fcm:           newFCMClientFromEnv(),
 		githubAuth:    newGitHubOAuthClientFromEnv(),
 	}
 	if err := s.ensureBootstrapAccounts(ctx); err != nil {

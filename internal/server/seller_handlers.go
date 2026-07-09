@@ -250,10 +250,17 @@ func (s *server) handleSellerOrderAction(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	item, err := s.sellers().UpdateOrderAction(r.Context(), orderID, body, sellerOrderActionExtras(r))
+	extras := sellerOrderActionExtras(r)
+	if orderCompletionStatus(body) {
+		extras["completedAt"] = time.Now().UTC().Format(time.RFC3339)
+	}
+	item, err := s.sellers().UpdateOrderAction(r.Context(), orderID, body, extras)
 	if err != nil {
 		s.failResourceCommand(w, r, resourceOrders, orderID, "update", err)
 		return
+	}
+	if orderCompletionStatus(body) {
+		s.enqueueOrderCompletionNotification(item, body)
 	}
 	s.ok(w, r, item)
 }
