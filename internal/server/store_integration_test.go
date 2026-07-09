@@ -157,6 +157,64 @@ func TestPostgresStoreRejectsDuplicateStudentNumber(t *testing.T) {
 	}
 }
 
+func TestGitHubOAuthReusesExistingCustomerIdentity(t *testing.T) {
+	store, ctx := openIntegrationStore(t)
+	suffix := randomToken()[:12]
+	githubID := time.Now().UnixNano()
+	existingUser := authUser{
+		ID:        "test-legacy-github-" + suffix,
+		GitHubID:  githubID,
+		Login:     "legacy-login-" + suffix,
+		Name:      "Legacy Student",
+		Provider:  "github",
+		Roles:     []string{roleCustomer},
+		AvatarURL: "https://example.com/legacy.png",
+		HTMLURL:   "https://github.com/legacy-login-" + suffix,
+	}
+	if _, err := store.saveCustomerProfile(ctx, existingUser, map[string]any{
+		"name":      existingUser.Name,
+		"studentNo": integrationStudentNo(),
+	}); err != nil {
+		t.Fatalf("save existing customer profile: %v", err)
+	}
+
+	oauthUser := authUser{
+		ID:        fmt.Sprintf("github-%d", githubID),
+		GitHubID:  githubID,
+		Login:     "renamed-login-" + suffix,
+		Name:      "GitHub Display Name",
+		Provider:  "github",
+		Roles:     []string{roleCustomer},
+		AvatarURL: "https://example.com/current.png",
+		HTMLURL:   "https://github.com/renamed-login-" + suffix,
+	}
+	server := &server{store: store}
+	session := authSession{
+		Token:     "test-github-session-" + suffix,
+		User:      oauthUser,
+		Role:      roleCustomer,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	mappedSession, err := server.sessionWithExistingGitHubCustomer(ctx, session)
+	if err != nil {
+		t.Fatalf("sessionWithExistingGitHubCustomer failed: %v", err)
+	}
+	if mappedSession.User.ID != existingUser.ID {
+		t.Fatalf("mapped user id = %q, want %q", mappedSession.User.ID, existingUser.ID)
+	}
+	if mappedSession.User.Login != oauthUser.Login {
+		t.Fatalf("mapped login = %q, want current OAuth login %q", mappedSession.User.Login, oauthUser.Login)
+	}
+
+	resolvedUser, found, err := store.authUserByGitHubIdentity(ctx, githubID, oauthUser.Login)
+	if err != nil {
+		t.Fatalf("authUserByGitHubIdentity failed: %v", err)
+	}
+	if !found || resolvedUser.ID != existingUser.ID || resolvedUser.Login != oauthUser.Login {
+		t.Fatalf("resolved user = %#v, found=%v; want existing id and current login", resolvedUser, found)
+	}
+}
+
 func TestPostgresStoreLedgerIdempotencyAndConcurrentDebit(t *testing.T) {
 	store, ctx := openIntegrationStore(t)
 	suffix := randomToken()[:12]

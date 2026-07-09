@@ -160,6 +160,12 @@ func (s *server) handleGitHubSession(w http.ResponseWriter, r *http.Request) {
 		s.ok(w, r, map[string]any{"status": "authenticated"})
 		return
 	}
+	var err error
+	session, err = s.sessionWithExistingGitHubCustomer(r.Context(), session)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "GitHub 계정 정보를 읽지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
 	if found, err := s.store.customerProfileExists(r.Context(), session.User.ID); err != nil {
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "학생 프로필을 읽지 못했습니다.", map[string]any{"cause": err.Error()})
 		return
@@ -178,6 +184,12 @@ func (s *server) handleStudentProfile(w http.ResponseWriter, r *http.Request) {
 	session, ok := s.sessionFromRequest(r)
 	if !ok {
 		s.fail(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "GitHub 로그인이 필요합니다.", nil)
+		return
+	}
+	var err error
+	session, err = s.sessionWithExistingGitHubCustomer(r.Context(), session)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "GitHub 계정 정보를 읽지 못했습니다.", map[string]any{"cause": err.Error()})
 		return
 	}
 	profile, ok := s.requestPayload(w, r)
@@ -255,6 +267,15 @@ func (s *server) completeGitHubOAuth(ctx context.Context, code, state, roleOverr
 		Provider:  "github",
 		Roles:     rolesForGitHubUser(role, githubUser.Email, githubUser.Login),
 	}
+	user, foundExistingCustomer, err := s.githubUserWithExistingCustomer(ctx, user)
+	if err != nil {
+		return authSession{}, "", err
+	}
+	if foundExistingCustomer {
+		if err := s.store.saveGitHubIdentity(ctx, user); err != nil {
+			return authSession{}, "", err
+		}
+	}
 	if !containsString(user.Roles, role) {
 		return authSession{}, "", fmt.Errorf("%s 권한으로 로그인할 수 없는 GitHub 계정입니다", role)
 	}
@@ -265,6 +286,48 @@ func (s *server) completeGitHubOAuth(ctx context.Context, code, state, roleOverr
 	}
 
 	return session, stateItem.RedirectAfter, nil
+}
+
+func (s *server) githubUserWithExistingCustomer(ctx context.Context, user authUser) (authUser, bool, error) {
+	if user.GitHubID <= 0 && strings.TrimSpace(user.Login) == "" {
+		return user, false, nil
+	}
+
+	existing, found, err := s.store.authUserByGitHubIdentity(ctx, user.GitHubID, user.Login)
+	if err != nil || !found {
+		return user, false, err
+	}
+
+	user.ID = existing.ID
+	user.Name = firstNonEmpty(existing.Name, user.Name)
+	user.Provider = "github"
+	if len(user.Roles) == 0 {
+		user.Roles = []string{roleCustomer}
+	}
+	return user, true, nil
+}
+
+func (s *server) sessionWithExistingGitHubCustomer(ctx context.Context, session authSession) (authSession, error) {
+	if session.User.Provider != "github" && session.User.GitHubID <= 0 {
+		return session, nil
+	}
+
+	user, found, err := s.githubUserWithExistingCustomer(ctx, session.User)
+	if err != nil || !found {
+		return session, err
+	}
+	if user.ID == session.User.ID {
+		session.User = user
+		return session, nil
+	}
+	session.User = user
+	if session.Token == "" {
+		return session, nil
+	}
+	if err := s.store.saveGitHubIdentity(ctx, user); err != nil {
+		return authSession{}, err
+	}
+	return session, s.store.saveSession(ctx, session)
 }
 
 func (s *server) handleAuthMe(w http.ResponseWriter, r *http.Request) {

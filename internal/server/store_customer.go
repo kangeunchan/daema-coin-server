@@ -80,29 +80,7 @@ RETURNING created_at, updated_at`,
 	}
 
 	if user.GitHubID > 0 {
-		_, err = tx.ExecContext(ctx, `
-INSERT INTO github_identities (
-	id, customer_id, github_id, login, email, avatar_url, html_url, created_at, updated_at
-) VALUES (
-	$1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), $8, $8
-)
-ON CONFLICT (github_id) DO UPDATE SET
-	customer_id = EXCLUDED.customer_id,
-	login = EXCLUDED.login,
-	email = EXCLUDED.email,
-	avatar_url = EXCLUDED.avatar_url,
-	html_url = EXCLUDED.html_url,
-	updated_at = EXCLUDED.updated_at`,
-			"github-identity-"+fmt.Sprint(user.GitHubID),
-			user.ID,
-			user.GitHubID,
-			firstNonEmpty(user.Login, user.ID),
-			user.Email,
-			user.AvatarURL,
-			user.HTMLURL,
-			now,
-		)
-		if err != nil {
+		if err := s.saveGitHubIdentityTx(ctx, tx, user, now); err != nil {
 			return nil, err
 		}
 	}
@@ -125,6 +103,105 @@ ON CONFLICT (github_id) DO UPDATE SET
 		"createdAt":   createdAt.UTC().Format(time.RFC3339),
 		"updatedAt":   updatedAt.UTC().Format(time.RFC3339),
 	}, nil
+}
+
+func (s *postgresStore) saveGitHubIdentity(ctx context.Context, user authUser) error {
+	if user.GitHubID <= 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := s.saveGitHubIdentityTx(ctx, tx, user, time.Now().UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *postgresStore) saveGitHubIdentityTx(ctx context.Context, tx *sql.Tx, user authUser, now time.Time) error {
+	if user.GitHubID <= 0 {
+		return nil
+	}
+
+	login := firstNonEmpty(user.Login, user.ID)
+	result, err := tx.ExecContext(ctx, `
+UPDATE github_identities
+SET
+	customer_id = $1,
+	login = $3,
+	email = NULLIF($4, ''),
+	avatar_url = NULLIF($5, ''),
+	html_url = NULLIF($6, ''),
+	updated_at = $7
+WHERE github_id = $2`,
+		user.ID,
+		user.GitHubID,
+		login,
+		user.Email,
+		user.AvatarURL,
+		user.HTMLURL,
+		now,
+	)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected > 0 {
+		return nil
+	}
+
+	result, err = tx.ExecContext(ctx, `
+UPDATE github_identities
+SET
+	customer_id = $1,
+	github_id = $2,
+	login = $3,
+	email = NULLIF($4, ''),
+	avatar_url = NULLIF($5, ''),
+	html_url = NULLIF($6, ''),
+	updated_at = $7
+WHERE lower(login) = lower($3)
+	AND github_id = 0`,
+		user.ID,
+		user.GitHubID,
+		login,
+		user.Email,
+		user.AvatarURL,
+		user.HTMLURL,
+		now,
+	)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected > 0 {
+		return nil
+	}
+
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO github_identities (
+	id, customer_id, github_id, login, email, avatar_url, html_url, created_at, updated_at
+) VALUES (
+	$1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), $8, $8
+)
+ON CONFLICT (github_id) DO UPDATE SET
+	customer_id = EXCLUDED.customer_id,
+	login = EXCLUDED.login,
+	email = EXCLUDED.email,
+	avatar_url = EXCLUDED.avatar_url,
+	html_url = EXCLUDED.html_url,
+	updated_at = EXCLUDED.updated_at`,
+		"github-identity-"+fmt.Sprint(user.GitHubID),
+		user.ID,
+		user.GitHubID,
+		login,
+		user.Email,
+		user.AvatarURL,
+		user.HTMLURL,
+		now,
+	)
+	return err
 }
 
 func validStudentNo(studentNo string) bool {
@@ -205,6 +282,44 @@ func (s *postgresStore) customerProfiles(ctx context.Context, limit int) ([]map[
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (s *postgresStore) authUserByGitHubIdentity(ctx context.Context, githubID int64, login string) (authUser, bool, error) {
+	login = strings.ToLower(strings.TrimSpace(login))
+	if githubID <= 0 && login == "" {
+		return authUser{}, false, nil
+	}
+	row := s.db.QueryRowContext(ctx, `
+	SELECT cp.id, cp.display_name, gi.github_id, gi.login, gi.email, gi.avatar_url, gi.html_url
+	FROM github_identities gi
+	JOIN customer_profiles cp ON cp.id = gi.customer_id
+	WHERE cp.status = 'active'
+		AND (
+			($1 > 0 AND gi.github_id = $1)
+			OR ($2 <> '' AND lower(gi.login) = $2 AND gi.github_id = 0)
+		)
+	ORDER BY CASE WHEN $1 > 0 AND gi.github_id = $1 THEN 0 ELSE 1 END
+	LIMIT 1`, githubID, login)
+
+	var user authUser
+	var email, avatarURL, htmlURL sql.NullString
+	if err := row.Scan(&user.ID, &user.Name, &user.GitHubID, &user.Login, &email, &avatarURL, &htmlURL); errors.Is(err, sql.ErrNoRows) {
+		return authUser{}, false, nil
+	} else if err != nil {
+		return authUser{}, false, err
+	}
+	user.Provider = "github"
+	user.Roles = []string{roleCustomer}
+	if email.Valid {
+		user.Email = email.String
+	}
+	if avatarURL.Valid {
+		user.AvatarURL = avatarURL.String
+	}
+	if htmlURL.Valid {
+		user.HTMLURL = htmlURL.String
+	}
+	return user, true, nil
 }
 
 func (s *postgresStore) authUserByGitHubLogin(ctx context.Context, login string) (authUser, bool, error) {
