@@ -116,7 +116,7 @@ func (s *server) activeCustomerPushTargets(ctx context.Context, userID string) (
 		if status != "active" {
 			continue
 		}
-		if value, _ := pushTargetFromBody(target); value == "" {
+		if value, targetType := pushTargetFromBody(target); value == "" || targetType != "token" {
 			continue
 		}
 		active = append(active, target)
