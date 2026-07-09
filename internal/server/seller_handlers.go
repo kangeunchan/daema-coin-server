@@ -306,9 +306,9 @@ func (s *server) handleBarcodeLookup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	code := payBarcodeCode(firstNonEmpty(stringValue(body["barcode"]), stringValue(body["code"]), stringValue(body["customerId"]), stringValue(body["studentNo"])))
+	code := payBarcodeCode(firstNonEmpty(stringValue(body["barcode"]), stringValue(body["code"])))
 	if code == "" {
-		s.fail(w, r, http.StatusBadRequest, "BARCODE_REQUIRED", "barcode, code 또는 고유번호가 필요합니다.", nil)
+		s.fail(w, r, http.StatusBadRequest, "BARCODE_REQUIRED", "대마페이 QR이 필요합니다.", nil)
 		return
 	}
 	payments := s.payments()
@@ -321,16 +321,7 @@ func (s *server) handleBarcodeLookup(w http.ResponseWriter, r *http.Request) {
 		s.ok(w, r, item)
 		return
 	}
-	item, found, err = payments.CustomerByPaymentIdentifier(r.Context(), code)
-	if err != nil {
-		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "고객 정보를 읽지 못했습니다.", map[string]any{"cause": err.Error()})
-		return
-	}
-	if found {
-		s.ok(w, r, item)
-		return
-	}
-	s.fail(w, r, http.StatusNotFound, "BARCODE_NOT_FOUND", "결제 바코드 또는 고객 고유번호를 찾을 수 없습니다.", nil)
+	s.fail(w, r, http.StatusNotFound, "BARCODE_NOT_FOUND", "대마페이 QR을 찾을 수 없습니다.", nil)
 }
 
 func (s *server) handlePaymentIntent(w http.ResponseWriter, r *http.Request) {
@@ -364,11 +355,11 @@ func (s *server) handlePaymentIntentError(w http.ResponseWriter, r *http.Request
 	case errors.Is(err, errPayBarcodeNotActive):
 		barcodeCode := payBarcodeCode(firstNonEmpty(stringValue(body["barcodeValue"]), stringValue(body["barcode"]), stringValue(body["code"])))
 		s.fail(w, r, http.StatusConflict, "PAY_BARCODE_NOT_ACTIVE", "사용할 수 없는 결제 바코드입니다.", map[string]any{"barcode": barcodeCode})
-	case errors.Is(err, errPaymentCustomerNotFound):
+	case errors.Is(err, errPayBarcodeNotFound):
 		barcodeCode := payBarcodeCode(firstNonEmpty(stringValue(body["barcodeValue"]), stringValue(body["barcode"]), stringValue(body["code"])))
-		s.fail(w, r, http.StatusNotFound, "PAYMENT_CUSTOMER_NOT_FOUND", "결제 바코드 또는 고객 고유번호를 찾을 수 없습니다.", map[string]any{"barcode": barcodeCode})
+		s.fail(w, r, http.StatusNotFound, "PAY_BARCODE_NOT_FOUND", "대마페이 QR을 찾을 수 없습니다.", map[string]any{"barcode": barcodeCode})
 	case errors.Is(err, errPaymentCustomerRequired):
-		s.fail(w, r, http.StatusBadRequest, "PAYMENT_CUSTOMER_REQUIRED", "customerId 또는 유효한 결제 바코드가 필요합니다.", nil)
+		s.fail(w, r, http.StatusBadRequest, "PAYMENT_CUSTOMER_REQUIRED", "유효한 대마페이 QR이 필요합니다.", nil)
 	case errors.Is(err, errPaymentIntentIdempotencyConflict):
 		id := resourceID(body, "payment-intent", "intentId", "idempotencyKey")
 		s.fail(w, r, http.StatusConflict, "PAYMENT_INTENT_IDEMPOTENCY_CONFLICT", "결제 intent idempotency 정보가 기존 요청과 일치하지 않습니다.", map[string]any{"intentId": id})

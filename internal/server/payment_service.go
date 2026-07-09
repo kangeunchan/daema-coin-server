@@ -9,7 +9,7 @@ var (
 	errInvalidPaymentAmount             = errors.New("payment amount must be a positive integer")
 	errInvalidPaymentCurrency           = errors.New("payment currency is invalid")
 	errPaymentCustomerRequired          = errors.New("payment customer is required")
-	errPaymentCustomerNotFound          = errors.New("payment customer not found")
+	errPayBarcodeNotFound               = errors.New("pay barcode not found")
 	errPayBarcodeNotActive              = errors.New("pay barcode is not active")
 	errPaymentIntentIdempotencyConflict = errors.New("payment intent idempotency conflict")
 	errRefundIdempotencyRequired        = errors.New("refund idempotency key is required")
@@ -27,7 +27,6 @@ type paymentServiceStore interface {
 	create(ctx context.Context, resource, id string, data map[string]any) (map[string]any, bool, error)
 	get(ctx context.Context, resource, id string) (map[string]any, bool, error)
 	listFiltered(ctx context.Context, resource string, filters []resourceFilter, limit int) ([]map[string]any, error)
-	customerByPaymentIdentifier(ctx context.Context, identifier string) (map[string]any, bool, error)
 	capturePaymentIntent(ctx context.Context, seller authUser, intentID string, req paymentCaptureRequest) (map[string]any, bool, error)
 	cancelPaymentIntent(ctx context.Context, seller authUser, intentID string, req paymentCancelRequest) (map[string]any, bool, error)
 	refundPayment(ctx context.Context, seller authUser, paymentID string, req paymentRefundRequest) (map[string]any, bool, error)
@@ -50,24 +49,15 @@ func (svc paymentService) CreateIntent(ctx context.Context, seller authUser, bod
 		if err != nil {
 			return nil, false, err
 		}
-		if found {
-			if !payBarcodeActive(barcode) {
-				return nil, false, errPayBarcodeNotActive
-			}
-			customerID = firstNonEmpty(customerID, stringValue(barcode["userId"]), stringValue(barcode["customerId"]))
-			intent["barcodeId"] = stringValue(barcode["id"])
-			intent["barcodeCode"] = stringValue(barcode["code"])
-		} else {
-			customer, found, err := svc.customerByPaymentIdentifier(ctx, barcodeCode)
-			if err != nil {
-				return nil, false, err
-			}
-			if !found {
-				return nil, false, errPaymentCustomerNotFound
-			}
-			customerID = firstNonEmpty(customerID, stringValue(customer["userId"]), stringValue(customer["id"]))
-			intent["customerLookupCode"] = barcodeCode
+		if !found {
+			return nil, false, errPayBarcodeNotFound
 		}
+		if !payBarcodeActive(barcode) {
+			return nil, false, errPayBarcodeNotActive
+		}
+		customerID = firstNonEmpty(customerID, stringValue(barcode["userId"]), stringValue(barcode["customerId"]))
+		intent["barcodeId"] = stringValue(barcode["id"])
+		intent["barcodeCode"] = stringValue(barcode["code"])
 	}
 	if customerID == "" {
 		return nil, false, errPaymentCustomerRequired
@@ -114,18 +104,6 @@ func (svc paymentService) Refund(ctx context.Context, seller authUser, paymentID
 
 func (svc paymentService) PayBarcodeByCode(ctx context.Context, code string) (map[string]any, bool, error) {
 	return svc.payBarcodeByCode(ctx, code)
-}
-
-func (svc paymentService) CustomerByPaymentIdentifier(ctx context.Context, identifier string) (map[string]any, bool, error) {
-	return svc.customerByPaymentIdentifier(ctx, identifier)
-}
-
-func (svc paymentService) customerByPaymentIdentifier(ctx context.Context, identifier string) (map[string]any, bool, error) {
-	identifier = payBarcodeCode(identifier)
-	if identifier == "" {
-		return nil, false, nil
-	}
-	return svc.store.customerByPaymentIdentifier(ctx, identifier)
 }
 
 func (svc paymentService) payBarcodeByCode(ctx context.Context, code string) (map[string]any, bool, error) {

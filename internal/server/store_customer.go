@@ -21,64 +21,6 @@ SELECT EXISTS (
 	return exists, err
 }
 
-func (s *postgresStore) customerByPaymentIdentifier(ctx context.Context, identifier string) (map[string]any, bool, error) {
-	identifier = strings.TrimSpace(identifier)
-	if identifier == "" {
-		return nil, false, nil
-	}
-
-	var id, displayName, status string
-	var schoolName, studentNo, grade, classNo sql.NullString
-	var createdAt, updatedAt time.Time
-	err := s.db.QueryRowContext(ctx, `
-SELECT id, display_name, school_name, student_no, grade, class_no, status, created_at, updated_at
-FROM customer_profiles
-WHERE status = 'active'
-	AND (id = $1 OR student_no = $1)
-LIMIT 1`, identifier).Scan(
-		&id,
-		&displayName,
-		&schoolName,
-		&studentNo,
-		&grade,
-		&classNo,
-		&status,
-		&createdAt,
-		&updatedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-
-	item := map[string]any{
-		"id":          id,
-		"userId":      id,
-		"customerId":  id,
-		"name":        displayName,
-		"displayName": displayName,
-		"status":      status,
-		"lookupType":  "customer",
-		"createdAt":   createdAt.UTC().Format(time.RFC3339),
-		"updatedAt":   updatedAt.UTC().Format(time.RFC3339),
-	}
-	if schoolName.Valid {
-		item["schoolName"] = schoolName.String
-	}
-	if studentNo.Valid {
-		item["studentNo"] = studentNo.String
-	}
-	if grade.Valid {
-		item["grade"] = grade.String
-	}
-	if classNo.Valid {
-		item["classNo"] = classNo.String
-	}
-	return item, true, nil
-}
-
 func (s *postgresStore) saveCustomerProfile(ctx context.Context, user authUser, profile map[string]any) (map[string]any, error) {
 	now := time.Now().UTC()
 	displayName := firstNonEmpty(
