@@ -295,10 +295,10 @@ func (s *postgresStore) authUserByGitHubIdentity(ctx context.Context, githubID i
 	JOIN customer_profiles cp ON cp.id = gi.customer_id
 	WHERE cp.status = 'active'
 		AND (
-			($1 > 0 AND gi.github_id = $1)
+			($1::bigint > 0 AND gi.github_id = $1)
 			OR ($2 <> '' AND lower(gi.login) = $2 AND gi.github_id = 0)
 		)
-	ORDER BY CASE WHEN $1 > 0 AND gi.github_id = $1 THEN 0 ELSE 1 END
+	ORDER BY CASE WHEN $1::bigint > 0 AND gi.github_id = $1 THEN 0 ELSE 1 END
 	LIMIT 1`, githubID, login)
 
 	var user authUser
