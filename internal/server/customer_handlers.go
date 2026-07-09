@@ -442,6 +442,10 @@ func (s *server) handleBoothHome(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if err := s.decorateBoothDisplayNames(r.Context(), booths, products); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "부스 이름을 읽지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
 	s.ok(w, r, map[string]any{"categories": categories, "banners": banners, "products": products, "booths": booths})
 }
 
@@ -456,6 +460,10 @@ func (s *server) handleBoothProducts(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.decorateProductsWithViewCounts(r.Context(), items); err != nil {
 		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "상품 조회수를 읽지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	if err := s.decorateBoothDisplayNames(r.Context(), nil, items); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "부스 이름을 읽지 못했습니다.", map[string]any{"cause": err.Error()})
 		return
 	}
 	s.okPage(w, r, items, &pagination{Limit: limit, HasMore: false})
@@ -514,6 +522,49 @@ func (s *server) decorateProductsWithViewCounts(ctx context.Context, products []
 		count := counts[id]
 		product["viewCount"] = count
 		product["meta"] = productViewMeta(count)
+	}
+	return nil
+}
+
+func (s *server) decorateBoothDisplayNames(ctx context.Context, booths []map[string]any, products []map[string]any) error {
+	namesByBoothID := map[string]string{}
+	for _, booth := range booths {
+		id := stringValue(booth["id"])
+		if id == "" {
+			continue
+		}
+		if name := firstNonEmpty(stringValue(booth["displayName"]), stringValue(booth["title"]), stringValue(booth["name"])); name != "" && name != id {
+			namesByBoothID[id] = name
+		}
+	}
+
+	accounts, err := s.store.internalAccounts(ctx, 10000)
+	if err != nil {
+		return err
+	}
+	for _, account := range accounts {
+		boothID := strings.TrimSpace(account.BoothID)
+		if boothID == "" || namesByBoothID[boothID] != "" {
+			continue
+		}
+		if name := strings.TrimSpace(account.DisplayName); name != "" && name != boothID {
+			namesByBoothID[boothID] = name
+		}
+	}
+
+	for _, booth := range booths {
+		id := stringValue(booth["id"])
+		if name := namesByBoothID[id]; name != "" {
+			booth["displayName"] = name
+			booth["boothName"] = name
+		}
+	}
+	for _, product := range products {
+		boothID := stringValue(product["boothId"])
+		if name := namesByBoothID[boothID]; name != "" {
+			product["displayName"] = name
+			product["boothName"] = name
+		}
 	}
 	return nil
 }
@@ -617,7 +668,15 @@ func (s *server) handleAnalyticsImpressionCreate(w http.ResponseWriter, r *http.
 }
 
 func (s *server) handleCart(w http.ResponseWriter, r *http.Request) {
-	s.respondResourceList(w, r, resourceCartItems, 100, resourceFilter{Field: "userId", Value: s.currentUserID(r)})
+	items, limit, ok := s.listResources(w, r, resourceCartItems, 100, resourceFilter{Field: "userId", Value: s.currentUserID(r)})
+	if !ok {
+		return
+	}
+	if err := s.decorateBoothDisplayNames(r.Context(), nil, items); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "부스 이름을 읽지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
+	s.okPage(w, r, items, &pagination{Limit: limit, HasMore: false})
 }
 
 func (s *server) handleCartItem(w http.ResponseWriter, r *http.Request) {
@@ -658,6 +717,10 @@ func (s *server) handleCartItem(w http.ResponseWriter, r *http.Request) {
 	body["thumbnail"] = body["imageUrl"]
 	body["unitAmount"] = amount("DMC", productUnitAmount(product))
 	body["price"] = body["unitAmount"]
+	if err := s.decorateBoothDisplayNames(r.Context(), nil, []map[string]any{body}); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "부스 이름을 읽지 못했습니다.", map[string]any{"cause": err.Error()})
+		return
+	}
 	item, err := s.customers().CreateCartItem(r.Context(), userID, body)
 	if err != nil {
 		if s.failCustomerMutationValidation(w, r, err, body) {
@@ -667,6 +730,27 @@ func (s *server) handleCartItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.created(w, r, item)
+}
+
+func (s *server) handleCartItemDelete(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("cartItemId"))
+	if id == "" {
+		s.fail(w, r, http.StatusBadRequest, "CART_ITEM_ID_REQUIRED", "cartItemId가 필요합니다.", nil)
+		return
+	}
+	item, found, err := s.store.get(r.Context(), resourceCartItems, id)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "DATABASE_READ_FAILED", "장바구니 항목을 읽지 못했습니다.", map[string]any{"cartItemId": id, "cause": err.Error()})
+		return
+	}
+	if !found || stringValue(item["userId"]) != s.currentUserID(r) {
+		s.fail(w, r, http.StatusNotFound, "CART_ITEM_NOT_FOUND", "장바구니 항목을 찾을 수 없습니다.", map[string]any{"cartItemId": id})
+		return
+	}
+	if !s.deleteResource(w, r, resourceCartItems, id) {
+		return
+	}
+	s.ok(w, r, map[string]any{"deleted": true, "cartItemId": id})
 }
 
 func (s *server) handleOrderPreview(w http.ResponseWriter, r *http.Request) {

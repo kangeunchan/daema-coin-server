@@ -55,6 +55,7 @@ func (s *server) routes() http.Handler {
 	routes.customer("POST /api/customer/analytics/impressions", s.handleAnalyticsImpressionCreate)
 	routes.customer("GET /api/customer/cart", s.handleCart)
 	routes.customer("POST /api/customer/cart/items", s.handleCartItem)
+	routes.customer("DELETE /api/customer/cart/items/{cartItemId}", s.handleCartItemDelete)
 	routes.customer("POST /api/customer/orders/preview", s.handleOrderPreview)
 	routes.customer("POST /api/customer/orders", s.handleOrderCreate)
 	routes.customer("GET /api/customer/orders", s.handleOrders)
