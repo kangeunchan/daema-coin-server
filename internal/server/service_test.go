@@ -8,7 +8,8 @@ import (
 )
 
 type fakePaymentStore struct {
-	items map[string]map[string]map[string]any
+	customers map[string]map[string]any
+	items     map[string]map[string]map[string]any
 }
 
 func newFakePaymentStore() *fakePaymentStore {
@@ -56,6 +57,15 @@ func (f *fakePaymentStore) listFiltered(_ context.Context, resource string, filt
 	return items, nil
 }
 
+func (f *fakePaymentStore) customerByPaymentIdentifier(_ context.Context, identifier string) (map[string]any, bool, error) {
+	for _, customer := range f.customers {
+		if customer["id"] == identifier || customer["userId"] == identifier || customer["studentNo"] == identifier {
+			return cloneMap(customer), true, nil
+		}
+	}
+	return nil, false, nil
+}
+
 func (f *fakePaymentStore) capturePaymentIntent(context.Context, authUser, string, paymentCaptureRequest) (map[string]any, bool, error) {
 	return nil, false, errors.New("not implemented")
 }
@@ -97,6 +107,60 @@ func TestPaymentServiceCreateIntentUsesActiveBarcodeCustomer(t *testing.T) {
 	}
 	if item["amount"].(map[string]any)["value"] != 900 {
 		t.Fatalf("created intent amount = %#v, want value 900", item["amount"])
+	}
+}
+
+func TestPaymentServiceCreateIntentUsesStudentNumberCustomer(t *testing.T) {
+	store := newFakePaymentStore()
+	store.customers = map[string]map[string]any{
+		"customer-1": {
+			"id":        "customer-1",
+			"userId":    "customer-1",
+			"studentNo": "20240001",
+			"status":    "active",
+		},
+	}
+	svc := paymentService{store: store}
+
+	item, created, err := svc.CreateIntent(context.Background(), authUser{ID: "seller-1", BoothID: "booth-1"}, map[string]any{
+		"idempotencyKey": "intent-student-1",
+		"barcode":        "2024 0001",
+		"amount":         1200,
+	})
+	if err != nil {
+		t.Fatalf("CreateIntent failed: %v", err)
+	}
+	if !created {
+		t.Fatal("CreateIntent returned existing item, want created")
+	}
+	if item["customerId"] != "customer-1" || item["customerLookupCode"] != "20240001" {
+		t.Fatalf("created intent = %#v, want customer from student number", item)
+	}
+}
+
+func TestPaymentServiceCreateIntentRejectsUnknownPaymentIdentifier(t *testing.T) {
+	store := newFakePaymentStore()
+	svc := paymentService{store: store}
+
+	_, _, err := svc.CreateIntent(context.Background(), authUser{ID: "seller-1", BoothID: "booth-1"}, map[string]any{
+		"idempotencyKey": "intent-missing-customer",
+		"barcode":        "20249999",
+		"amount":         1200,
+	})
+	if !errors.Is(err, errPaymentCustomerNotFound) {
+		t.Fatalf("CreateIntent err = %v, want errPaymentCustomerNotFound", err)
+	}
+}
+
+func TestPayBarcodeCodeNormalizesFullPayValues(t *testing.T) {
+	for input, want := range map[string]string{
+		"DAEMA-PAY:PAY-001":                  "PAY-001",
+		"daema-pay:DMC:12480:USER-DEMO-0001": "USER-DEMO-0001",
+		"2024 0001":                          "20240001",
+	} {
+		if got := payBarcodeCode(input); got != want {
+			t.Fatalf("payBarcodeCode(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 
