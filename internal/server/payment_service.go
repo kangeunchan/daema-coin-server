@@ -27,6 +27,7 @@ type paymentServiceStore interface {
 	create(ctx context.Context, resource, id string, data map[string]any) (map[string]any, bool, error)
 	get(ctx context.Context, resource, id string) (map[string]any, bool, error)
 	listFiltered(ctx context.Context, resource string, filters []resourceFilter, limit int) ([]map[string]any, error)
+	customerProfileByID(ctx context.Context, id string) (map[string]any, bool, error)
 	capturePaymentIntent(ctx context.Context, seller authUser, intentID string, req paymentCaptureRequest) (map[string]any, bool, error)
 	cancelPaymentIntent(ctx context.Context, seller authUser, intentID string, req paymentCancelRequest) (map[string]any, bool, error)
 	refundPayment(ctx context.Context, seller authUser, paymentID string, req paymentRefundRequest) (map[string]any, bool, error)
@@ -103,7 +104,11 @@ func (svc paymentService) Refund(ctx context.Context, seller authUser, paymentID
 }
 
 func (svc paymentService) PayBarcodeByCode(ctx context.Context, code string) (map[string]any, bool, error) {
-	return svc.payBarcodeByCode(ctx, code)
+	item, found, err := svc.payBarcodeByCode(ctx, code)
+	if err != nil || !found {
+		return item, found, err
+	}
+	return svc.withPayBarcodeCustomer(ctx, item)
 }
 
 func (svc paymentService) payBarcodeByCode(ctx context.Context, code string) (map[string]any, bool, error) {
@@ -122,4 +127,27 @@ func (svc paymentService) payBarcodeByCode(ctx context.Context, code string) (ma
 		return nil, false, nil
 	}
 	return items[0], true, nil
+}
+
+func (svc paymentService) withPayBarcodeCustomer(ctx context.Context, barcode map[string]any) (map[string]any, bool, error) {
+	customerID := firstNonEmpty(stringValue(barcode["userId"]), stringValue(barcode["customerId"]))
+	if customerID == "" {
+		return barcode, true, nil
+	}
+	customer, found, err := svc.store.customerProfileByID(ctx, customerID)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return barcode, true, nil
+	}
+	item := cloneMap(barcode)
+	item["customerId"] = customerID
+	item["userId"] = customerID
+	for _, key := range []string{"displayName", "name", "schoolName", "studentNo", "grade", "classNo", "githubLogin", "avatarUrl"} {
+		if value, ok := customer[key]; ok {
+			item[key] = value
+		}
+	}
+	return item, true, nil
 }

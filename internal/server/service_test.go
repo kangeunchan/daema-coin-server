@@ -8,7 +8,8 @@ import (
 )
 
 type fakePaymentStore struct {
-	items map[string]map[string]map[string]any
+	customerProfiles map[string]map[string]any
+	items            map[string]map[string]map[string]any
 }
 
 func newFakePaymentStore() *fakePaymentStore {
@@ -56,6 +57,14 @@ func (f *fakePaymentStore) listFiltered(_ context.Context, resource string, filt
 	return items, nil
 }
 
+func (f *fakePaymentStore) customerProfileByID(_ context.Context, id string) (map[string]any, bool, error) {
+	item, ok := f.customerProfiles[id]
+	if !ok {
+		return nil, false, nil
+	}
+	return cloneMap(item), true, nil
+}
+
 func (f *fakePaymentStore) capturePaymentIntent(context.Context, authUser, string, paymentCaptureRequest) (map[string]any, bool, error) {
 	return nil, false, errors.New("not implemented")
 }
@@ -97,6 +106,40 @@ func TestPaymentServiceCreateIntentUsesActiveBarcodeCustomer(t *testing.T) {
 	}
 	if item["amount"].(map[string]any)["value"] != 900 {
 		t.Fatalf("created intent amount = %#v, want value 900", item["amount"])
+	}
+}
+
+func TestPaymentServicePayBarcodeByCodeIncludesCustomerProfile(t *testing.T) {
+	store := newFakePaymentStore()
+	store.items[resourcePayBarcodes] = map[string]map[string]any{
+		"pay-1": {
+			"id":        "pay-1",
+			"code":      "PAY-001",
+			"userId":    "customer-1",
+			"status":    "active",
+			"expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		},
+	}
+	store.customerProfiles = map[string]map[string]any{
+		"customer-1": {
+			"id":          "customer-1",
+			"userId":      "customer-1",
+			"displayName": "강은찬",
+			"name":        "강은찬",
+			"studentNo":   "20240001",
+		},
+	}
+	svc := paymentService{store: store}
+
+	item, found, err := svc.PayBarcodeByCode(context.Background(), "DAEMA-PAY:PAY-001")
+	if err != nil {
+		t.Fatalf("PayBarcodeByCode failed: %v", err)
+	}
+	if !found {
+		t.Fatal("PayBarcodeByCode found = false, want true")
+	}
+	if item["displayName"] != "강은찬" || item["studentNo"] != "20240001" || item["customerId"] != "customer-1" {
+		t.Fatalf("barcode lookup item = %#v, want customer profile fields", item)
 	}
 }
 
