@@ -277,7 +277,12 @@ func TestPredictionServiceCreateUsesTypedStakeRequest(t *testing.T) {
 		balance:    1000,
 		items:      map[string]map[string]any{},
 	}
-	svc := predictionService{matches: deps, wallet: deps, store: deps}
+	svc := predictionService{
+		matches: deps,
+		wallet:  deps,
+		store:   deps,
+		now:     func() time.Time { return pointConversionAtKST.Add(-time.Hour) },
+	}
 
 	result, err := svc.Create(context.Background(), authUser{ID: "user-1", Login: "octo"}, "match-1", map[string]any{
 		"pick":        "home",

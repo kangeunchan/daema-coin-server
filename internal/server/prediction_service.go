@@ -20,10 +20,11 @@ type predictionService struct {
 	matches predictionMatchReader
 	wallet  predictionWalletReader
 	store   predictionStore
+	now     func() time.Time
 }
 
 func (s *server) predictions() predictionService {
-	return predictionService{matches: s, wallet: s, store: s.store}
+	return predictionService{matches: s, wallet: s, store: s.store, now: time.Now}
 }
 
 type predictionMatchReader interface {
@@ -49,11 +50,12 @@ type predictionCreateResult struct {
 }
 
 func (svc predictionService) Create(ctx context.Context, user authUser, matchID string, body map[string]any) (predictionCreateResult, error) {
+	now := svc.currentTime()
 	req, err := newPredictionCreateRequest(body)
 	if err != nil {
 		return predictionCreateResult{}, errPredictionInvalidInput
 	}
-	if !worldcupPredictionOpenAt(time.Now()) {
+	if !worldcupPredictionOpenAt(now) {
 		return predictionCreateResult{StakeAmount: req.StakeAmount}, errPredictionClosed
 	}
 	match, matchStatusKnown, err := svc.matches.worldcupMatchByID(ctx, matchID)
@@ -74,7 +76,7 @@ func (svc predictionService) Create(ctx context.Context, user authUser, matchID 
 	if pointBalance < req.StakeAmount {
 		return predictionCreateResult{StakeAmount: req.StakeAmount}, errPredictionInsufficientFund
 	}
-	stakeLedgerID := ledgerID("prediction-stake", matchID, user.ID, strconv.FormatInt(time.Now().UTC().UnixNano(), 10))
+	stakeLedgerID := ledgerID("prediction-stake", matchID, user.ID, strconv.FormatInt(now.UTC().UnixNano(), 10))
 	id := predictionID(matchID, user.ID)
 	stakeReq := newPredictionStakeRequest(matchID, user, req, stakeLedgerID)
 	item, created, err := svc.store.createWorldcupPredictionWithStake(ctx, user, id, stakeReq)
@@ -90,7 +92,7 @@ type predictionCancelResult struct {
 }
 
 func (svc predictionService) Cancel(ctx context.Context, user authUser, matchID string) (predictionCancelResult, error) {
-	if !worldcupPredictionOpenAt(time.Now()) {
+	if !worldcupPredictionOpenAt(svc.currentTime()) {
 		return predictionCancelResult{}, errPredictionCancelClosed
 	}
 	match, matchStatusKnown, err := svc.matches.worldcupMatchByID(ctx, matchID)
@@ -120,6 +122,13 @@ func (svc predictionService) Cancel(ctx context.Context, user authUser, matchID 
 		return predictionCancelResult{RefundAmount: cancelReq.StakeAmount}, errPredictionNotFound
 	}
 	return predictionCancelResult{Cancelled: true, RefundAmount: cancelReq.StakeAmount}, nil
+}
+
+func (svc predictionService) currentTime() time.Time {
+	if svc.now != nil {
+		return svc.now()
+	}
+	return time.Now()
 }
 
 func (svc predictionService) Settle(ctx context.Context, matchID, winningPick, source, note string) (predictionSettlementResult, error) {

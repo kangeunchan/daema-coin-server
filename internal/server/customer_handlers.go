@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -27,10 +28,22 @@ func (s *server) createLedgerAndAdjustWallet(ctx context.Context, user authUser,
 }
 
 func (s *server) grantSignupBonus(ctx context.Context, user authUser) error {
-	if _, err := s.createLedgerAndAdjustWallet(ctx, user, ledgerID("signup-bonus", "DMC", user.ID), "signup-bonus", "income", "DMC", initialSignupDMC, map[string]any{"description": "회원가입 대마코인 지급"}); err != nil {
+	if err := s.grantSignupBonusCurrency(ctx, user, "DMC", initialSignupDMC, "회원가입 대마코인 지급"); err != nil {
 		return err
 	}
-	_, err := s.createLedgerAndAdjustWallet(ctx, user, ledgerID("signup-bonus", "POINT", user.ID), "signup-bonus", "income", "POINT", initialSignupPoints, map[string]any{"description": "회원가입 대마포인트 지급"})
+	return s.grantSignupBonusCurrency(ctx, user, "POINT", initialSignupPoints, "회원가입 대마포인트 지급")
+}
+
+func (s *server) grantSignupBonusCurrency(ctx context.Context, user authUser, currency string, amount int, description string) error {
+	_, err := s.createLedgerAndAdjustWallet(ctx, user, ledgerID("signup-bonus", currency, user.ID), "signup-bonus", "income", currency, amount, map[string]any{"description": description})
+	if errors.Is(err, errLedgerIdempotencyConflict) {
+		slog.Warn("signup bonus ledger already exists with legacy idempotency shape",
+			"user_id", user.ID,
+			"currency", currency,
+			"ledger_id", ledgerID("signup-bonus", currency, user.ID),
+		)
+		return nil
+	}
 	return err
 }
 
